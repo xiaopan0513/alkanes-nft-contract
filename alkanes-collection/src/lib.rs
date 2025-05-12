@@ -1,7 +1,6 @@
 //! # Alkane Collection Contract
 //!
 //! This contract implements an NFT collection with the following features:
-//! - Dynamic minting difficulty based on block statistics
 //! - Premine mechanism for initial token distribution
 //! - Block height based minting start control
 //! - Lottery-based minting success rate
@@ -27,10 +26,10 @@ use crate::generation::svg_generator::SvgGenerator;
 mod generation;
 
 /// Template ID for orbital NFT
-const ORBITAL_TEMPLATE_ID: u128 = 888001;
+const ORBITAL_TEMPLATE_ID: u128 = 896420;
 
 /// Name of the NFT collection
-const CONTRACT_NAME: &str = "Alkane Oyly";
+const CONTRACT_NAME: &str = "Oyly";
 
 /// Symbol of the NFT collection
 const CONTRACT_SYMBOL: &str = "Oyly";
@@ -42,18 +41,12 @@ const MAX_MINTS: u128 = 9900;
 /// This value can be set to 0 if no premine is needed
 const PREMINE_MINTS: u128 = 100;
 
-/// Initial difficulty for minting (5 = 20% success rate)
-const INITIAL_DIFFICULTY: u128 = 5;
-
-/// Minimum difficulty for minting (10 = 10% success rate)
-const MIN_DIFFICULTY: u128 = 10;
-
-/// Target number of mints per block for difficulty adjustment
-const TARGET_MINTS_PER_BLOCK: u32 = 10;
-
 /// Block height at which public minting begins
 /// If set to 0, minting will be available immediately without block height restriction
-const MINT_START_BLOCK: u64 = 251733;
+const MINT_START_BLOCK: u64 = 896420;
+
+/// Success rate (percentage), e.g. 50 means 50%
+const SUCCESS_RATE: u128 = 35;
 
 /// Collection Contract Structure
 /// This is the main contract structure that implements the NFT collection functionality
@@ -104,6 +97,11 @@ enum CollectionMessage {
     #[returns(u128)]
     GetOrbitalMinted,
 
+    /// Get the per mint amount of orbitals
+    #[opcode(104)]
+    #[returns(u128)]
+    GetValuePerMint,
+
     /// Get the collection identifier
     #[opcode(998)]
     #[returns(String)]
@@ -142,9 +140,7 @@ impl Token for Collection {
 impl Collection {
     /// Initialize the contract
     ///
-    /// This function:
-    /// 1. Sets initial difficulty and block statistics
-    /// 2. Initializes all necessary storage values
+    /// initializes all necessary storage values
     ///
     /// # Returns
     /// * `Result<CallResponse>` - Success or failure of initialization
@@ -152,11 +148,8 @@ impl Collection {
         self.observe_initialization()?;
 
         // Initialize storage values
-        self.set_difficulty(INITIAL_DIFFICULTY);
-        self.set_current_block_mints(0);
-        self.set_last_block_height(self.height());
         self.set_instances_count(0);
-        self.set_auth_mint_count(0);  // Initialize auth mint count to 0
+        self.set_auth_mint_count(0);
 
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
@@ -229,16 +222,11 @@ impl Collection {
 
     /// Public mint function for orbitals
     ///
-    /// This function:
-    /// 1. Checks if current block height has reached mint start block
-    /// 2. Updates block statistics and adjusts difficulty
-    /// 3. Calculates minting success based on difficulty
-    /// 4. Creates new NFT if successful
-    ///
     /// # Returns
     /// * `Result<CallResponse>` - Success or failure of minting operation
     fn mint_orbital(&self) -> Result<CallResponse> {
         let context = self.context()?;
+
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
         self.observe_mint()?;
@@ -254,7 +242,7 @@ impl Collection {
     fn create_mint_transfer(&self) -> Result<AlkaneTransfer> {
         let index = self.instances_count();
 
-        if index >= self.max_mints() {
+        if index >= (self.max_mints() + PREMINE_MINTS) {
             return Err(anyhow!("Minted out"));
         }
 
@@ -291,47 +279,6 @@ impl Collection {
         MAX_MINTS
     }
 
-    /// Get storage pointer for difficulty
-    ///
-    /// # Returns
-    /// * `StoragePointer` - Pointer to difficulty storage
-    fn get_difficulty_pointer(&self) -> StoragePointer {
-        StoragePointer::from_keyword("/difficulty")
-    }
-
-    /// Get current difficulty level
-    ///
-    /// Higher difficulty means lower success rate
-    ///
-    /// # Returns
-    /// * `u128` - Current difficulty value
-    fn get_difficulty(&self) -> u128 {
-        let difficulty = self.get_difficulty_pointer().get_value::<u128>();
-        if difficulty == 0 {
-            INITIAL_DIFFICULTY // Initial 20% success rate
-        } else {
-            difficulty
-        }
-    }
-
-    /// Set current difficulty level
-    ///
-    /// # Arguments
-    /// * `difficulty` - New difficulty value
-    fn set_difficulty(&self, difficulty: u128) {
-        self.get_difficulty_pointer().set_value(difficulty);
-    }
-
-    /// Get storage pointer for last processed block height
-    fn get_last_block_height_pointer(&self) -> StoragePointer {
-        StoragePointer::from_keyword("/last_block_height")
-    }
-
-    /// Get storage pointer for current block mints
-    fn get_current_block_mints_pointer(&self) -> StoragePointer {
-        StoragePointer::from_keyword("/current_block_mints")
-    }
-
     /// Get storage pointer for authorized mint count
     fn get_auth_mint_count_pointer(&self) -> StoragePointer {
         StoragePointer::from_keyword("/auth_mint_count")
@@ -347,81 +294,27 @@ impl Collection {
         self.get_auth_mint_count_pointer().set_value(count);
     }
 
-    /// Get last processed block height
-    fn get_last_block_height(&self) -> u64 {
-        self.get_last_block_height_pointer().get_value()
-    }
-
-    /// Set last processed block height
-    fn set_last_block_height(&self, height: u64) {
-        self.get_last_block_height_pointer().set_value(height);
-    }
-
-    /// Get current block mints
-    fn get_current_block_mints(&self) -> u32 {
-        self.get_current_block_mints_pointer().get_value()
-    }
-
-    /// Set current block mints
-    fn set_current_block_mints(&self, mints: u32) {
-        self.get_current_block_mints_pointer().set_value(mints);
-    }
-
-    /// Update block statistics and adjust difficulty for the next block
-    ///
-    /// This function:
-    /// 1. Checks if we're in a new block
-    /// 2. Adjusts difficulty based on previous block's mint count
-    /// 3. Resets block counter
-    /// 4. Updates last block height
-    ///
-    /// # Returns
-    /// * `Result<()>` - Success or failure of update
-    fn update_block_stats(&self) -> Result<()> {
-        let current_height = self.height();
-        let last_height = self.get_last_block_height();
-
-        // If entering a new block, adjust the difficulty based on the number of mints in the previous block
-        // Reset block counter and update difficulty
-        // Use bitcoin_hashes SHA256 to hash the entire transaction data
-        // Use the first 16 bytes of the hash result as a random value
-        // Only record the number of mints on success
-        if current_height != last_height {
-            let block_mints = self.get_current_block_mints();
-            let current_difficulty = self.get_difficulty();
-
-            // Adjust the difficulty for the next block
-            // Reset block counter and update difficulty
-            let new_difficulty = if block_mints > TARGET_MINTS_PER_BLOCK {
-                current_difficulty.saturating_add(1)
-            } else if block_mints < TARGET_MINTS_PER_BLOCK {
-                current_difficulty.saturating_sub(1).max(MIN_DIFFICULTY)
-            } else {
-                current_difficulty
-            };
-
-            // Reset block counter and update difficulty
-            self.set_difficulty(new_difficulty);
-            self.set_current_block_mints(0);
-            self.set_last_block_height(current_height);
-        }
-
-        Ok(())
-    }
-
     /// Calculate a random value from transaction data
     ///
-    /// Uses SHA256 hash of transaction data to generate a random value
+    /// Uses SHA256 hash of transaction data and block height to generate a random value
     /// Takes first 16 bytes of hash as random number
     ///
+    /// # Arguments
+    /// * `height` - Current block height
+    ///
     /// # Returns
-    /// * `u128` - Random value derived from transaction
-    fn calculate_random_from_tx(&self) -> u128 {
+    /// * `u128` - Random value derived from transaction and block height
+    fn calculate_random_from_tx(&self, height: u64) -> u128 {
         let tx_data = self.transaction();
+        let height_bytes = height.to_le_bytes();
 
-        // Use bitcoin_hashes SHA256 to hash the entire transaction data
-        // Use the first 16 bytes of the hash result as a random value
-        let hash = sha256::Hash::hash(&tx_data);
+        // Combine transaction data with block height
+        let mut combined_data = Vec::with_capacity(tx_data.len() + height_bytes.len());
+        combined_data.extend_from_slice(&tx_data);
+        combined_data.extend_from_slice(&height_bytes);
+
+        // Use bitcoin_hashes SHA256 to hash the combined data
+        let hash = sha256::Hash::hash(&combined_data);
         let result = hash.to_byte_array();
 
         // Use the first 16 bytes of the hash result as a random value
@@ -436,34 +329,26 @@ impl Collection {
     /// 1. Verifies block height requirements (if MINT_START_BLOCK > 0)
     /// 2. Updates block statistics
     /// 3. Calculates random value from transaction
-    /// 4. Determines minting success based on difficulty
+    /// 4. Determines minting success based on SUCCESS_RATE percentage
     ///
     /// # Returns
     /// * `Result<()>` - Success or failure of minting attempt
     fn observe_mint(&self) -> Result<()> {
         // Check if current block height has reached start block (if MINT_START_BLOCK > 0)
+        let current_height = self.height();
         if MINT_START_BLOCK > 0 {
-            let current_height = self.height();
             if current_height < MINT_START_BLOCK {
                 return Err(anyhow!("Minting has not started yet. Current block: {}, Start block: {}", current_height, MINT_START_BLOCK));
             }
         }
 
-        // First update block statistics
-        self.update_block_stats()?;
-
-        // Check if minting is successful using the current difficulty
-        let random_value = self.calculate_random_from_tx();
-        let difficulty = self.get_difficulty();
-
-        let success = random_value % difficulty == 0;
-
+        // Determine minting success based on SUCCESS_RATE percentage
+        let random_value = self.calculate_random_from_tx(current_height);
+        let success = (random_value % 100) < SUCCESS_RATE;
         if success {
-            // Only record the number of mints on success
-            self.record_successful_mint()?;
             Ok(())
         } else {
-            Err(anyhow!("The transaction was not matched in the lottery."))
+            Err(anyhow!("The transaction {} was not matched.", random_value))
         }
     }
 
@@ -543,8 +428,7 @@ impl Collection {
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
         // Total supply is the current instances count
-        let total_supply = self.instances_count() * 100000000u128;
-        response.data = total_supply.to_le_bytes().to_vec();
+        response.data = self.instances_count().to_le_bytes().to_vec();
 
         Ok(response)
     }
@@ -555,6 +439,16 @@ impl Collection {
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
         response.data = MAX_MINTS.to_le_bytes().to_vec();
+
+        Ok(response)
+    }
+
+    /// Get the mint per amount of orbitals
+    fn get_value_per_mint(&self) -> Result<CallResponse> {
+        let context = self.context()?;
+        let mut response = CallResponse::forward(&context.incoming_alkanes);
+
+        response.data = 1u128.to_le_bytes().to_vec();
 
         Ok(response)
     }
@@ -602,18 +496,6 @@ impl Collection {
         let attributes = SvgGenerator::get_attributes(index)?;
         response.data = attributes.into_bytes();
         Ok(response)
-    }
-
-    /// Record successful minting
-    ///
-    /// Increments the current block's mint counter
-    ///
-    /// # Returns
-    /// * `Result<()>` - Success or failure of recording
-    fn record_successful_mint(&self) -> Result<()> {
-        let current_mints = self.get_current_block_mints();
-        self.set_current_block_mints(current_mints + 1);
-        Ok(())
     }
 }
 

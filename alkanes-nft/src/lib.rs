@@ -61,7 +61,7 @@ enum OrbitalInstanceMessage {
 
 impl Token for OrbitalInstance {
   fn name(&self) -> String {
-    let name = String::from("Alkane Oyly");
+    let name = String::from("Oyly");
     format!("{} #{}", name, self.index())
   }
 
