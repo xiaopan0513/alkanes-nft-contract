@@ -239,7 +239,6 @@ impl Collection {
     /// * `Result<CallResponse>` - Success or failure of minting operation
     fn mint_orbital(&self) -> Result<CallResponse> {
         let context = self.context()?;
-        let mut response = CallResponse::forward(&context.incoming_alkanes);
 
         let index = self.instances_count();
         if index >= (self.max_mints() + PREMINE_MINTS) {
@@ -254,41 +253,34 @@ impl Collection {
             }
         }
 
-        // Find the payment in the incoming alkanes
-        let mut payment_amount = 0u128;
-        for transfer in &context.incoming_alkanes.0 {
-            if transfer.id == PAYMENT_TOKEN_ID {
-                payment_amount = transfer.value;
-                break;
-            }
+        let mut incoming_alkanes = context.incoming_alkanes.clone();
+
+        // 找到 deposit_transfer 的索引
+        let deposit_index = incoming_alkanes
+            .0
+            .iter()
+            .position(|transfer| transfer.id == PAYMENT_TOKEN_ID)
+            .ok_or_else(|| anyhow!("Deposit transfer not found"))?;
+
+        // 获取并检查 deposit_transfer 的值
+        let amount = incoming_alkanes.0[deposit_index].value;
+        if amount < MINT_PRICE {
+            return Err(anyhow!("Payment amount {} below minimum {}", amount, MINT_PRICE));
         }
 
-        // Check if at least one orbital can be purchased
-        if payment_amount == 0 {
-            return Err(anyhow!("Insufficient payment"));
-        }
+        // Add change if any
+        let change = amount.checked_sub(MINT_PRICE)
+        .ok_or_else(|| anyhow!("Payment calculation error"))?;
 
-        // Check if payment amount is sufficient
-        if payment_amount < MINT_PRICE {
-            return Err(anyhow!("Insufficient payment amount"));
-        }
-
+        incoming_alkanes.0[deposit_index].value = change;
+        let mut response = CallResponse::forward(&context.incoming_alkanes);
+            
         // Mint NFT
         let minted_orbital = self.create_mint_transfer()?;
         response.alkanes.0.push(minted_orbital);
 
         // Record payment amount
-        self.add_payment_amount(MINT_PRICE);
-
-        // Add change if any
-        let change = payment_amount.checked_sub(MINT_PRICE)
-            .ok_or_else(|| anyhow!("Payment calculation error"))?;
-        if change > 0 {
-            response.alkanes.0.push(AlkaneTransfer {
-                id: PAYMENT_TOKEN_ID,
-                value: change,
-            });
-        }
+        // self.add_payment_amount(MINT_PRICE);
 
         Ok(response)
     }
@@ -526,17 +518,22 @@ impl Collection {
             return Err(anyhow!("less than 1 unit of collection token supplied to authenticate"));
         }
 
-        // Get total payment amount from storage
-        let total_payments = self.get_total_payments();
+        // // Get total payment amount from storage
+        // let total_payments = self.get_total_payments();
 
-        // Transfer all payment tokens to caller
-        if total_payments > 0 {
-            response.alkanes.0.push(AlkaneTransfer {
-                id: PAYMENT_TOKEN_ID,
-                value: total_payments,
-            });
-            // Reset payment amount after successful withdrawal
-            self.set_total_payments(0);
+        // // Transfer all payment tokens to caller
+        // if total_payments > 0 {
+        //     response.alkanes.0.push(AlkaneTransfer {
+        //         id: PAYMENT_TOKEN_ID,
+        //         value: total_payments,
+        //     });
+        //     // Reset payment amount after successful withdrawal
+        //     self.set_total_payments(0);
+        // }
+
+        let total_balance = self.balance(&context.myself, &PAYMENT_TOKEN_ID);
+        if total_balance > 0 {
+            response.alkanes.0.push(AlkaneTransfer { id: context.myself.clone(), value: total_balance });
         }
 
         Ok(response)
