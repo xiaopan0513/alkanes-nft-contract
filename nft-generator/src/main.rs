@@ -12,13 +12,16 @@ fn main() -> Result<()> {
         std::fs::create_dir(output_dir)?;
     }
 
-    for i in 1000..1001 {
+    for i in 0..3600 {
         let svg = SvgGenerator::generate_svg(i)?;
         let filename = format!("output/{:04}.svg", i);
         std::fs::write(&filename, svg)?;
-        
+
+        let attributes = SvgGenerator::get_attributes(i)?;
+        println!("{}", attributes);
+
         if i % 100 == 0 {
-            println!("Generated {}/10000 images", i);
+            println!("Generated {}/3600 images", i);
         }
     }
     

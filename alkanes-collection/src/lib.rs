@@ -6,47 +6,97 @@
 //! - Lottery-based minting success rate
 //! - SVG-based token generation
 
-use metashrew_support::index_pointer::KeyValuePointer;
-use metashrew_support::compat::to_arraybuffer_layout;
 use alkanes_runtime::{
-    declare_alkane, message::MessageDispatch, storage::StoragePointer, token::Token,
-    runtime::AlkaneResponder,
+    declare_alkane, message::MessageDispatch, runtime::AlkaneResponder, storage::StoragePointer,
+    token::Token,
 };
+use metashrew_support::compat::to_arraybuffer_layout;
+use metashrew_support::index_pointer::KeyValuePointer;
+use metashrew_support::utils::{consume_exact, consume_sized_int, consume_to_end};
 
 use alkanes_support::{
     cellpack::Cellpack, id::AlkaneId,
-    parcel::{AlkaneTransfer, AlkaneTransferParcel}, response::CallResponse,
+    parcel::{AlkaneTransfer, AlkaneTransferParcel}, response::CallResponse, witness::find_witness_payload,
 };
 
-use anyhow::{anyhow, Result};
-use std::sync::Arc;
-use bitcoin::hashes::{sha256, Hash};
 use crate::generation::svg_generator::SvgGenerator;
+use anyhow::{anyhow, Result};
+use bitcoin::{Transaction, TxOut};
+use metashrew_support::utils::consensus_decode;
+use rs_merkle::{algorithms::Sha256, Hasher, MerkleProof};
+use std::io::Cursor;
+use std::sync::Arc;
+use serde_json::json;
 
 mod generation;
 
 /// Template ID for orbital NFT
-const ORBITAL_TEMPLATE_ID: u128 = 896420;
+const ORBITAL_TEMPLATE_ID: u128 = 999901;
 
 /// Name of the NFT collection
-const CONTRACT_NAME: &str = "Oyly";
+const CONTRACT_NAME: &str = "Orbinauts";
 
 /// Symbol of the NFT collection
-const CONTRACT_SYMBOL: &str = "Oyly";
+const CONTRACT_SYMBOL: &str = "Orbinaut";
 
 /// Maximum number of NFTs that can be minted
-const MAX_MINTS: u128 = 9900;
+const MAX_MINTS: u128 = 3600;
 
-/// Number of NFTs to be premined during contract initialization
-/// This value can be set to 0 if no premine is needed
-const PREMINE_MINTS: u128 = 100;
+/// Maximum number of NFTs that can be purchased in a single transaction during whitelist phase
+const WHITELIST_MAX_PURCHASE_PER_TX: u128 = 2;
+
+/// Maximum number of NFTs that can be purchased in a single transaction during public phase
+const PUBLIC_MAX_PURCHASE_PER_TX: u128 = 1;
+
+/// Block height at which whitelist minting begins
+const WHITELIST_MINT_START_BLOCK: u64 = 899069;
 
 /// Block height at which public minting begins
-/// If set to 0, minting will be available immediately without block height restriction
-const MINT_START_BLOCK: u64 = 896420;
+const PUBLIC_MINT_START_BLOCK: u64 = 899089;
 
-/// Success rate (percentage), e.g. 50 means 50%
-const SUCCESS_RATE: u128 = 35;
+const TAPROOT_SCRIPT_PUBKEY: [u8; 34] = [
+    0x51, 0x20, 0x4b, 0x3c, 0x9d, 0x68, 0xdb, 0x3a, 0x99, 0x7e,
+    0xed, 0x99, 0x1c, 0xcc, 0xc9, 0xf7, 0xe7, 0x45, 0x51, 0x8b,
+    0x46, 0x3e, 0xb8, 0xa6, 0x46, 0x09, 0x8f, 0x8e, 0xe5, 0x74,
+    0xb9, 0xa2, 0x0f, 0x9c
+];
+
+const MERKLE_ROOT: [u8; 32] = [
+    0x1e, 0x80, 0xa9, 0x9c, 0x1a, 0x72, 0x3f, 0x0e,
+    0x49, 0x87, 0xaa, 0x5b, 0x56, 0x5b, 0x83, 0x2f,
+    0xc0, 0x2a, 0xf6, 0xcc, 0x34, 0x8c, 0xae, 0xe9,
+    0x60, 0x99, 0xbc, 0x3a, 0xfe, 0xce, 0x09, 0x14
+];
+
+const MERKLE_LEAF_COUNT: u128 = 1738;
+
+/// Price per NFT in payment tokens
+const BTC_MINT_PRICE: u128 = 31000;
+
+/// Payment option structure
+#[derive(Clone)]
+struct PaymentOption {
+    token_id: AlkaneId,
+    price: u128,
+}
+
+/// Payment options for minting
+const PAYMENT_OPTIONS: [PaymentOption; 2] = [
+    PaymentOption {
+        token_id: AlkaneId {
+            block: 2,
+            tx: 0,
+        },
+        price: 60000000,
+    },
+    PaymentOption {
+        token_id: AlkaneId {
+            block: 2,
+            tx: 16,
+        },
+        price: 100000000000,
+    },
+];
 
 /// Collection Contract Structure
 /// This is the main contract structure that implements the NFT collection functionality
@@ -71,6 +121,19 @@ enum CollectionMessage {
     /// Mint a new orbital NFT
     #[opcode(77)]
     MintOrbital,
+
+    /// Mint a new orbital NFT
+    #[opcode(78)]
+    MintOrbitalBtc,
+
+    /// Withdraw payment tokens from contract
+    #[opcode(80)]
+    Withdraw,
+
+    /// Get vault balances for all payment tokens
+    #[opcode(81)]
+    #[returns(Vec<u128>)]
+    GetVaultBalance,
 
     /// Get the name of the collection
     #[opcode(99)]
@@ -155,12 +218,10 @@ impl Collection {
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
         // Collection token acts as auth token for contract minting without any limits
-        if PREMINE_MINTS > 0 {
-            response.alkanes.0.push(AlkaneTransfer {
-                id: context.myself.clone(),
-                value: 1u128,
-            });
-        }
+        response.alkanes.0.push(AlkaneTransfer {
+            id: context.myself.clone(),
+            value: 1u128,
+        });
 
         Ok(response)
     }
@@ -169,41 +230,16 @@ impl Collection {
     ///
     /// This function:
     /// 1. Verifies that the caller is the contract owner
-    /// 2. Checks if PREMINE_MINTS is greater than 0
-    /// 3. Checks if the requested mint count plus current auth mint count doesn't exceed PREMINE_MINTS
-    /// 4. Mints the specified number of orbitals
-    /// 5. Returns the minted orbital transfers
+    /// 2. Mints the specified number of orbitals
+    /// 3. Returns the minted orbital transfers
     ///
     /// # Returns
     /// * `Result<CallResponse>` - Success or failure of minting operation
     fn auth_mint_orbital(&self, count: u128) -> Result<CallResponse> {
+        self.only_owner()?;
+
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
-
-        if context.incoming_alkanes.0.len() != 1 {
-            return Err(anyhow!("did not authenticate with only the collection token"));
-        }
-
-        let transfer = context.incoming_alkanes.0[0].clone();
-        if transfer.id != context.myself.clone() {
-            return Err(anyhow!("supplied alkane is not collection token"));
-        }
-
-        if transfer.value < 1 {
-            return Err(anyhow!("less than 1 unit of collection token supplied to authenticate"));
-        }
-
-        // Check if PREMINE_MINTS is greater than 0
-        if PREMINE_MINTS == 0 {
-            return Err(anyhow!("Premine minting is not enabled (PREMINE_MINTS is 0)"));
-        }
-
-        // Check if the requested mint count plus current auth mint count doesn't exceed PREMINE_MINTS
-        let current_auth_mints = self.get_auth_mint_count();
-        if current_auth_mints + count > PREMINE_MINTS {
-            return Err(anyhow!("Requested mint count {} plus current auth mints {} would exceed premine limit of {}", 
-                count, current_auth_mints, PREMINE_MINTS));
-        }
 
         let mut minted_orbitals = Vec::new();
 
@@ -212,27 +248,169 @@ impl Collection {
             minted_orbitals.push(self.create_mint_transfer()?);
         }
 
-        // Update the auth mint count
-        self.set_auth_mint_count(current_auth_mints + count);
-
         response.alkanes.0.extend(minted_orbitals);
 
         Ok(response)
     }
 
-    /// Public mint function for orbitals
+    /// Get storage pointer for public mint addresses
+    fn public_mint_addresses_pointer(&self) -> StoragePointer {
+        StoragePointer::from_keyword("/public-mint-addresses")
+    }
+
+    /// Check if an address has already minted in public phase
+    fn has_public_minted(&self, output_script: &Vec<u8>) -> bool {
+        self.public_mint_addresses_pointer().select(output_script).get_value::<u8>() == 1
+    }
+
+    /// Mark an address as having minted in public phase
+    fn mark_public_minted(&self, output_script: &Vec<u8>) {
+        self.public_mint_addresses_pointer().select(output_script).set_value::<u8>(1);
+    }
+
+    /// Common pre-mint checks
     ///
-    /// # Returns
-    /// * `Result<CallResponse>` - Success or failure of minting operation
+    /// Checks:
+    /// 1. Total supply limit
+    /// 2. Mint start block
+    /// 3. Whitelist status
+    /// 4. Public mint address restriction
+    fn check_mint_prerequisites(&self, count: u128, tx: Option<&Transaction>) -> Result<()> {
+        // Check total supply limit
+        let index = self.instances_count();
+        if index >= self.max_mints() {
+            return Err(anyhow!("Minted out"));
+        }
+
+        // Check mint start block
+        let current_height = self.height();
+        
+        // Check if we're in whitelist phase
+        if current_height >= WHITELIST_MINT_START_BLOCK && current_height < PUBLIC_MINT_START_BLOCK {
+            // In whitelist phase, must verify whitelist
+            self.verify_minted_pubkey(count, tx)?;
+        } else if current_height < WHITELIST_MINT_START_BLOCK {
+            return Err(anyhow!("Minting has not started yet. Current block: {}, Whitelist start: {}, Public start: {}", 
+                current_height, WHITELIST_MINT_START_BLOCK, PUBLIC_MINT_START_BLOCK));
+        } else {
+            // In public phase, check if address has already minted
+            let tx = match tx {
+                Some(tx) => tx.clone(),
+                None => consensus_decode::<Transaction>(&mut std::io::Cursor::new(self.transaction()))?,
+            };
+            let output_script = tx.output[0].script_pubkey.clone().into_bytes().to_vec();
+            if self.has_public_minted(&output_script) {
+                return Err(anyhow!("Address has already minted in public phase"));
+            }
+            // Mark address as minted in public phase
+            self.mark_public_minted(&output_script);
+        }
+
+        Ok(())
+    }
+
+    /// Public mint function for orbitals using Alkanes
     fn mint_orbital(&self) -> Result<CallResponse> {
         let context = self.context()?;
 
-        let mut response = CallResponse::forward(&context.incoming_alkanes);
+        if context.incoming_alkanes.0.len() != 1 {
+            return Err(anyhow!("Payments include multiple alkanes"));
+        }
 
-        self.observe_mint()?;
-        response.alkanes.0.push(self.create_mint_transfer()?);
+        let transfer = context.incoming_alkanes.0[0];
+        
+        // Find matching payment option
+        let payment_option = PAYMENT_OPTIONS.iter()
+            .find(|option| option.token_id == transfer.id)
+            .ok_or_else(|| anyhow!("Incorrect payment alkanes"))?;
+
+        let (purchase_count, change) = self.calculate_purchase_count(transfer.value, payment_option.price);
+        if purchase_count == 0 {
+            return Err(anyhow!("Insufficient payment"));
+        }
+
+        // Run common pre-mint checks
+        self.check_mint_prerequisites(purchase_count, None)?;
+
+        let mut response = CallResponse::default();
+
+        if change > 0 {
+            response.alkanes.0.push(AlkaneTransfer {
+                id: payment_option.token_id,
+                value: change,
+            });
+        }
+
+        for _ in 0..purchase_count {
+            response.alkanes.0.push(self.create_mint_transfer()?);
+        }
 
         Ok(response)
+    }
+
+    /// Public mint function for orbitals using BTC
+    fn mint_orbital_btc(&self) -> Result<CallResponse> {
+        let context = self.context()?;
+
+        let tx = consensus_decode::<Transaction>(&mut std::io::Cursor::new(self.transaction()))
+            .map_err(|e| anyhow!("Failed to parse Bitcoin transaction: {}", e))?;
+        let btc_amount = self.compute_btc_output(&tx);
+
+        // Check if payment was provided
+        if btc_amount < BTC_MINT_PRICE {
+            return Err(anyhow!("BTC payment amount {} below minimum {}", btc_amount, BTC_MINT_PRICE));
+        }
+
+        let current_height = self.height();
+        let max_purchase = if current_height >= WHITELIST_MINT_START_BLOCK && current_height < PUBLIC_MINT_START_BLOCK {
+            WHITELIST_MAX_PURCHASE_PER_TX
+        } else {
+            PUBLIC_MAX_PURCHASE_PER_TX
+        };
+
+        let purchase_count = std::cmp::min(btc_amount / BTC_MINT_PRICE, max_purchase);
+        if purchase_count == 0 {
+            return Err(anyhow!("Insufficient BTC payment"));
+        }
+
+        // Run common pre-mint checks
+        self.check_mint_prerequisites(purchase_count, Some(&tx))?;
+
+        let mut response = CallResponse::forward(&context.incoming_alkanes);
+
+        for _ in 0..purchase_count {
+            response.alkanes.0.push(self.create_mint_transfer()?);
+        }
+
+        Ok(response)
+    }
+
+    /// Calculate the number of orbitals that can be purchased with the given payment amount
+    pub fn calculate_purchase_count(&self, payment_amount: u128, price: u128) -> (u128, u128) {
+        let current_height = self.height();
+        let max_purchase = if current_height >= WHITELIST_MINT_START_BLOCK && current_height < PUBLIC_MINT_START_BLOCK {
+            WHITELIST_MAX_PURCHASE_PER_TX
+        } else {
+            PUBLIC_MAX_PURCHASE_PER_TX
+        };
+
+        let count = payment_amount / price;
+        let limited_count = std::cmp::min(count, max_purchase);
+        let change = payment_amount - (limited_count * price);
+        (limited_count, change)
+    }
+
+    /// Compute the total output value sent to the taproot address
+    fn compute_btc_output(&self, tx: &Transaction) -> u128 {
+        let total = tx.output.iter().fold(0, |r: u128, v: &TxOut| -> u128 {
+            if v.script_pubkey.as_bytes().to_vec() == TAPROOT_SCRIPT_PUBKEY {
+                r + <u64 as Into<u128>>::into(v.value.to_sat())
+            } else {
+                r
+            }
+        });
+
+        total
     }
 
     /// Create a mint transfer
@@ -241,8 +419,9 @@ impl Collection {
     /// * `Result<AlkaneTransfer>` - The transfer object or error
     fn create_mint_transfer(&self) -> Result<AlkaneTransfer> {
         let index = self.instances_count();
+        let max_total = self.max_mints();
 
-        if index >= (self.max_mints() + PREMINE_MINTS) {
+        if index >= max_total {
             return Err(anyhow!("Minted out"));
         }
 
@@ -279,6 +458,29 @@ impl Collection {
         MAX_MINTS
     }
 
+    /// Verify that the caller is the contract owner using collection token
+    ///
+    /// # Returns
+    /// * `Result<()>` - Success or error if not owner
+    fn only_owner(&self) -> Result<()> {
+        let context = self.context()?;
+
+        if context.incoming_alkanes.0.len() != 1 {
+            return Err(anyhow!("did not authenticate with only the collection token"));
+        }
+
+        let transfer = context.incoming_alkanes.0[0].clone();
+        if transfer.id != context.myself.clone() {
+            return Err(anyhow!("supplied alkane is not collection token"));
+        }
+
+        if transfer.value < 1 {
+            return Err(anyhow!("less than 1 unit of collection token supplied to authenticate"));
+        }
+
+        Ok(())
+    }
+
     /// Get storage pointer for authorized mint count
     fn get_auth_mint_count_pointer(&self) -> StoragePointer {
         StoragePointer::from_keyword("/auth_mint_count")
@@ -292,64 +494,6 @@ impl Collection {
     /// Set authorized mint count
     fn set_auth_mint_count(&self, count: u128) {
         self.get_auth_mint_count_pointer().set_value(count);
-    }
-
-    /// Calculate a random value from transaction data
-    ///
-    /// Uses SHA256 hash of transaction data and block height to generate a random value
-    /// Takes first 16 bytes of hash as random number
-    ///
-    /// # Arguments
-    /// * `height` - Current block height
-    ///
-    /// # Returns
-    /// * `u128` - Random value derived from transaction and block height
-    fn calculate_random_from_tx(&self, height: u64) -> u128 {
-        let tx_data = self.transaction();
-        let height_bytes = height.to_le_bytes();
-
-        // Combine transaction data with block height
-        let mut combined_data = Vec::with_capacity(tx_data.len() + height_bytes.len());
-        combined_data.extend_from_slice(&tx_data);
-        combined_data.extend_from_slice(&height_bytes);
-
-        // Use bitcoin_hashes SHA256 to hash the combined data
-        let hash = sha256::Hash::hash(&combined_data);
-        let result = hash.to_byte_array();
-
-        // Use the first 16 bytes of the hash result as a random value
-        let mut bytes = [0u8; 16];
-        bytes.copy_from_slice(&result[..16]);
-        u128::from_le_bytes(bytes)
-    }
-
-    /// Check minting restrictions and process attempt
-    ///
-    /// This function:
-    /// 1. Verifies block height requirements (if MINT_START_BLOCK > 0)
-    /// 2. Updates block statistics
-    /// 3. Calculates random value from transaction
-    /// 4. Determines minting success based on SUCCESS_RATE percentage
-    ///
-    /// # Returns
-    /// * `Result<()>` - Success or failure of minting attempt
-    fn observe_mint(&self) -> Result<()> {
-        // Check if current block height has reached start block (if MINT_START_BLOCK > 0)
-        let current_height = self.height();
-        if MINT_START_BLOCK > 0 {
-            if current_height < MINT_START_BLOCK {
-                return Err(anyhow!("Minting has not started yet. Current block: {}, Start block: {}", current_height, MINT_START_BLOCK));
-            }
-        }
-
-        // Determine minting success based on SUCCESS_RATE percentage
-        let random_value = self.calculate_random_from_tx(current_height);
-        let success = (random_value % 100) < SUCCESS_RATE;
-        if success {
-            Ok(())
-        } else {
-            Err(anyhow!("The transaction {} was not matched.", random_value))
-        }
     }
 
     /// Get instance storage pointer
@@ -386,7 +530,7 @@ impl Collection {
     fn add_instance(&self, instance_id: &AlkaneId) -> Result<u128> {
         let count = self.instances_count();
         let new_count = count.checked_add(1)
-            .ok_or_else(|| anyhow!("instances count overflow"))?;
+            .ok_or_else(|| anyhow!("Minted out"))?;
 
         let mut bytes = Vec::with_capacity(32);
         bytes.extend_from_slice(&instance_id.block.to_le_bytes());
@@ -494,8 +638,128 @@ impl Collection {
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
         let attributes = SvgGenerator::get_attributes(index)?;
+        println!("{}", attributes);  // 输出 JSON 字符串
         response.data = attributes.into_bytes();
         Ok(response)
+    }
+
+    /// Withdraw payment tokens from contract
+    ///
+    /// This function:
+    /// 1. Verifies that the caller is the contract owner using collection token
+    /// 2. Transfers all payment tokens to the caller
+    ///
+    /// # Returns
+    /// * `Result<CallResponse>` - Success or failure of withdrawal operation
+    fn withdraw(&self) -> Result<CallResponse> {
+        self.only_owner()?;
+
+        let context = self.context()?;
+        let mut response = CallResponse::forward(&context.incoming_alkanes);
+
+        // Withdraw all payment tokens
+        for option in PAYMENT_OPTIONS.iter() {
+            let total_balance = self.balance(&context.myself, &option.token_id);
+            if total_balance > 0 {
+                response.alkanes.0.push(AlkaneTransfer { 
+                    id: option.token_id, 
+                    value: total_balance 
+                });
+            }
+        }
+
+        Ok(response)
+    }
+
+    /// Get vault balances for all payment tokens
+    ///
+    /// # Returns
+    /// * `Result<CallResponse>` - Success or failure of balance check
+    fn get_vault_balance(&self) -> Result<CallResponse> {
+        let context = self.context()?;
+        let mut response = CallResponse::forward(&context.incoming_alkanes);
+
+        // Get balances for all payment tokens
+        let mut balances = Vec::new();
+        for option in PAYMENT_OPTIONS.iter() {
+            let balance = self.balance(&context.myself, &option.token_id);
+            let id_str = format!("{}:{}", option.token_id.block, option.token_id.tx);
+            balances.push(json!({
+                "AlkanesId": id_str,
+                "Balance": balance
+            }));
+        }
+
+        // Convert to JSON string
+        let json_str = json!(balances).to_string();
+        response.data = json_str.into_bytes();
+
+        Ok(response)
+    }
+
+    pub fn script_minted_count_pointer(&self, index: u32) -> StoragePointer {
+        StoragePointer::from_keyword(format!("/minted-pubkey-{}", index).as_str())
+    }
+
+    pub fn get_script_minted_count(&self, index: u32) -> Result<u128> {
+        let pointer = self.script_minted_count_pointer(index);
+        let count = pointer.get_value::<u128>();
+        Ok(count)
+    }
+
+    pub fn add_script_minted_count(&self, index: u32, add_count: u128, limit: u128) -> Result<()> {
+        let mut pointer = self.script_minted_count_pointer(index);
+        let current_count = pointer.get_value::<u128>();
+        let new_count = current_count.checked_add(add_count)
+            .ok_or_else(|| anyhow!("Minted count exceeds limit."))?;
+
+        if new_count > limit {
+            return Err(anyhow!("Minted count exceeds limit."));
+        }
+        pointer.set_value::<u128>(new_count);
+        Ok(())
+    }
+
+    pub fn verify_minted_pubkey(&self, count: u128, tx: Option<&Transaction>) -> Result<()> {
+        let tx = match tx {
+            Some(tx) => tx.clone(),
+            None => consensus_decode::<Transaction>(&mut std::io::Cursor::new(self.transaction()))?,
+        };
+
+        let output_script = tx.output[0]
+            .script_pubkey
+            .clone()
+            .into_bytes()
+            .to_vec();
+
+        let mut cursor: Cursor<Vec<u8>> =
+            Cursor::<Vec<u8>>::new(find_witness_payload(&tx, 0).ok_or("").map_err(|_| {
+                anyhow!("Proof not submitted to whitelist.")
+            })?);
+
+        let leaf = consume_exact(&mut cursor, output_script.len() + 8)?;
+        let leaf_hash = Sha256::hash(&leaf);
+        let proof = consume_to_end(&mut cursor)?;
+        let mut leaf_cursor = Cursor::new(leaf.clone());
+        let script = consume_exact(&mut leaf_cursor, output_script.len())?;
+        let index = consume_sized_int::<u32>(&mut leaf_cursor)?;
+        let limit = consume_sized_int::<u32>(&mut leaf_cursor)?;
+
+        if script != *output_script {
+            return Err(anyhow!("Invalid whitelist proof."));
+        }
+
+        if !MerkleProof::<Sha256>::try_from(proof)?.verify(
+            MERKLE_ROOT,
+            &[index as usize],
+            &[leaf_hash],
+            MERKLE_LEAF_COUNT as usize,
+        ) {
+            return Err(anyhow!("Not on the whitelist."));
+        }
+
+        self.add_script_minted_count(index, count, limit as u128)?;
+        Ok(())
     }
 }
 

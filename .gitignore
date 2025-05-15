@@ -9,6 +9,7 @@ Cargo.lock
 .vscode/
 *.swp
 *.swo
+output
 
 # Generated WebAssembly files
 *.wasm
