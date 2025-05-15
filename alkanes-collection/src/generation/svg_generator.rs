@@ -2,7 +2,7 @@ use serde_json::{Value};
 use anyhow::{anyhow, Result};
 
 const ENCODED_TRAITS_JSON: &str = include_str!("encoded_traits.json");
-const SVG_TEMPLATES_JSON: &str = include_str!("svg_template.json");
+const SVG_TEMPLATES_JSON: &str = include_str!("svg_templates.json");
 
 /// SVG Generator for NFT images
 /// This struct handles the generation of SVG images for NFTs based on encoded traits
@@ -26,62 +26,36 @@ impl SvgGenerator {
     }
 
     /// Decode traits for a specific NFT index
-    /// 
-    /// # Arguments
-    /// * `index` - The index of the NFT
-    /// 
-    /// # Returns
-    /// * `Result<(String, String, String, String, String, String, u64)>` - Tuple containing:
-    ///   - background trait
-    ///   - base trait
-    ///   - body trait
-    ///   - eyes trait
-    ///   - head trait
-    ///   - mouth trait
-    ///   - rank
-    pub fn decode_traits(index: u128) -> Result<(String, String, String, String, String, String, u64)> {
+    /// 返回 (background, misc, visors, suits)
+    pub fn decode_traits(index: u128) -> Result<(String, String, String, String)> {
         let encoded_traits = Self::get_encoded_traits();
-        let traits_array = encoded_traits["traits"].as_array()
-            .ok_or_else(|| anyhow!("Invalid traits array"))?;
-        let encoded = traits_array.get(index as usize)
+        let format = &encoded_traits["format"];
+        let indices = &encoded_traits["indices"];
+        let items = encoded_traits["items"].as_array().ok_or_else(|| anyhow!("Invalid items array"))?;
+        let encoded = items.get(index as usize)
             .ok_or_else(|| anyhow!("Invalid trait index"))?
             .as_u64()
             .ok_or_else(|| anyhow!("Invalid trait format"))?;
 
-        let components = &encoded_traits["components"];
+        // 解码顺序: backgrounds, misc, visors, suits
         let mut pre_bits = 0u64;
-        let mut bits = components["background"]["bits"].as_u64().unwrap();
-        let background_code = ((encoded >> pre_bits) & ((1u64 << bits) - 1)) as usize;
-        pre_bits += bits;
+        let mut get_code = |key: &str| -> anyhow::Result<usize> {
+            let bits = format[key]["bits"].as_u64().unwrap();
+            let code = ((encoded >> pre_bits) & ((1u64 << bits) - 1)) as usize;
+            pre_bits += bits;
+            Ok(code)
+        };
+        let bg_code = get_code("backgrounds")?;
+        let misc_code = get_code("misc")?;
+        let visors_code = get_code("visors")?;
+        let suits_code = get_code("suits")?;
 
-        bits = components["base"]["bits"].as_u64().unwrap();
-        let base_code = ((encoded >> pre_bits) & ((1u64 << bits) - 1)) as usize;
-        pre_bits += bits;
+        let bg = indices["backgrounds"][bg_code].as_str().unwrap().to_string();
+        let misc = indices["misc"][misc_code].as_str().unwrap().to_string();
+        let visors = indices["visors"][visors_code].as_str().unwrap().to_string();
+        let suits = indices["suits"][suits_code].as_str().unwrap().to_string();
 
-        bits = components["body"]["bits"].as_u64().unwrap();
-        let body_code = ((encoded >> pre_bits) & ((1u64 << bits) - 1)) as usize;
-        pre_bits += bits;
-
-        bits = components["eyes"]["bits"].as_u64().unwrap();
-        let eyes_code = ((encoded >> pre_bits) & ((1u64 << bits) - 1)) as usize;
-        pre_bits += bits;
-
-        bits = components["head"]["bits"].as_u64().unwrap();
-        let head_code = ((encoded >> pre_bits) & ((1u64 << bits) - 1)) as usize;
-        pre_bits += bits;
-
-        bits = components["mouth"]["bits"].as_u64().unwrap();
-        let mouth_code = ((encoded >> pre_bits) & ((1u64 << bits) - 1)) as usize;
-        pre_bits += bits;
-
-        let background = components["background"]["values"][background_code].as_str().unwrap().to_string();
-        let base = components["base"]["values"][base_code].as_str().unwrap().to_string();
-        let body = components["body"]["values"][body_code].as_str().unwrap().to_string();
-        let eyes = components["eyes"]["values"][eyes_code].as_str().unwrap().to_string();
-        let head = components["head"]["values"][head_code].as_str().unwrap().to_string();
-        let mouth = components["mouth"]["values"][mouth_code].as_str().unwrap().to_string();
-        let rank = encoded >> pre_bits;
-        Ok((background, base, body, eyes, head, mouth, rank))
+        Ok((bg, misc, visors, suits))
     }
 
     /// Generate SVG image for a specific NFT index
@@ -92,49 +66,41 @@ impl SvgGenerator {
     /// # Returns
     /// * `Result<String>` - SVG image data as string
     pub fn generate_svg(index: u128) -> Result<String> {
-        let (background, base, body, eyes, head, mouth, _) = Self::decode_traits(index)?;
+        let (background, misc, visors, suits) = Self::decode_traits(index)?;
         let svg_templates = Self::get_svg_templates();
 
-        let mut svg = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" shape-rendering=\"crispEdges\" viewBox=\"0 0 32 32\">\n");
+        let mut svg = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" shape-rendering=\"crispEdges\" viewBox=\"0 0 200 200\">\n");
 
         // Add background
-        let bg_template = svg_templates["bg"].get(&background)
-            .ok_or_else(|| anyhow!("Background template not found: {}", background))?;
-        svg.push_str(&format!("\t{}\n", bg_template.as_str().unwrap()));
-
-        // Add base
-        let base_template = svg_templates["base"].get(&base)
-            .ok_or_else(|| anyhow!("Base template not found: {}", base))?;
-        svg.push_str(&format!("\t{}\n", base_template.as_str().unwrap()));
-
-        // Add body if not none
-        if body != "none" {
-            let body_template = svg_templates["body"].get(&body)
-                .ok_or_else(|| anyhow!("Body template not found: {}", body))?;
-            svg.push_str(&format!("\t{}\n", body_template.as_str().unwrap()));
+        if background != "none" {
+            let bg_template = svg_templates.get(&background)
+                .ok_or_else(|| anyhow!("Background template not found: {}", background))?;
+            svg.push_str(bg_template.as_str().unwrap());
+            svg.push('\n');
         }
-
-        // Add head if not none
-        if head != "none" {
-            // Handle hornsPNG naming compatibility
-            let head_key = if head == "horns" { "horns" } else { &head };
-            let head_template = svg_templates["head"].get(head_key)
-                .ok_or_else(|| anyhow!("Head template not found: {}", head_key))?;
-            svg.push_str(&format!("\t{}\n", head_template.as_str().unwrap()));
+        // Add misc
+        if misc != "none" {
+            let misc_template = svg_templates.get(&misc)
+                .ok_or_else(|| anyhow!("Misc template not found: {}", misc))?;
+            svg.push_str(misc_template.as_str().unwrap());
+            svg.push('\n');
         }
-
-        // Add eyes
-        let eyes_template = svg_templates["eyes"].get(&eyes)
-            .ok_or_else(|| anyhow!("Eyes template not found: {}", eyes))?;
-        svg.push_str(&format!("\t{}\n", eyes_template.as_str().unwrap()));
-
-        // Add mouth
-        let mouth_template = svg_templates["mouth"].get(&mouth)
-            .ok_or_else(|| anyhow!("Mouth template not found: {}", mouth))?;
-        svg.push_str(&format!("\t{}\n", mouth_template.as_str().unwrap()));
+        // Add visors
+        if visors != "none" {
+            let visors_template = svg_templates.get(&visors)
+                .ok_or_else(|| anyhow!("Visors template not found: {}", visors))?;
+            svg.push_str(visors_template.as_str().unwrap());
+            svg.push('\n');
+        }
+        // Add suits
+        if suits != "none" {
+            let suits_template = svg_templates.get(&suits)
+                .ok_or_else(|| anyhow!("Suits template not found: {}", suits))?;
+            svg.push_str(suits_template.as_str().unwrap());
+            svg.push('\n');
+        }
 
         svg.push_str("</svg>");
-
         Ok(svg)
     }
 
@@ -146,39 +112,25 @@ impl SvgGenerator {
     /// # Returns
     /// * `Result<String>` - JSON string containing NFT attributes
     pub fn get_attributes(index: u128) -> Result<String> {
-        let (background, base, body, eyes, head, mouth, rank) = Self::decode_traits(index)?;
-        
+        let (background, misc, visors, suits) = Self::decode_traits(index)?;
         let attributes = serde_json::json!([
-                {
-                    "trait_type": "Background",
-                    "value": background
-                },
-                {
-                    "trait_type": "Base",
-                    "value": base
-                },
-                {
-                    "trait_type": "Body",
-                    "value": body
-                },
-                {
-                    "trait_type": "Eyes",
-                    "value": eyes
-                },
-                {
-                    "trait_type": "Head",
-                    "value": head
-                },
-                {
-                    "trait_type": "Mouth",
-                    "value": mouth
-                },
-                {
-                    "trait_type": "Rank",
-                    "value": rank
-                }
-            ]);
-
+            {
+                "trait_type": "Background",
+                "value": background
+            },
+            {
+                "trait_type": "Misc",
+                "value": misc
+            },
+            {
+                "trait_type": "Visors",
+                "value": visors
+            },
+            {
+                "trait_type": "Suits",
+                "value": suits
+            }
+        ]);
         Ok(attributes.to_string())
     }
 } 

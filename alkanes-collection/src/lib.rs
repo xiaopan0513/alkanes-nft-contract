@@ -20,22 +20,21 @@ use alkanes_support::{
 
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
-use bitcoin::hashes::{sha256, Hash};
 use crate::generation::svg_generator::SvgGenerator;
 
 mod generation;
 
 /// Template ID for orbital NFT
-const ORBITAL_TEMPLATE_ID: u128 = 896420;
+const ORBITAL_TEMPLATE_ID: u128 = 252173;
 
 /// Name of the NFT collection
-const CONTRACT_NAME: &str = "Oyly";
+const CONTRACT_NAME: &str = "Orbinauts";
 
 /// Symbol of the NFT collection
-const CONTRACT_SYMBOL: &str = "Oyly";
+const CONTRACT_SYMBOL: &str = "Orbinaut";
 
 /// Maximum number of NFTs that can be minted
-const MAX_MINTS: u128 = 9900;
+const MAX_MINTS: u128 = 3500;
 
 /// Number of NFTs to be premined during contract initialization
 /// This value can be set to 0 if no premine is needed
@@ -43,10 +42,16 @@ const PREMINE_MINTS: u128 = 100;
 
 /// Block height at which public minting begins
 /// If set to 0, minting will be available immediately without block height restriction
-const MINT_START_BLOCK: u64 = 896420;
+const MINT_START_BLOCK: u64 = 252173;
 
-/// Success rate (percentage), e.g. 50 means 50%
-const SUCCESS_RATE: u128 = 35;
+/// Price per NFT in payment tokens
+const MINT_PRICE: u128 = 500;
+
+/// Payment token ID
+const PAYMENT_TOKEN_ID: AlkaneId = AlkaneId {
+    block: 2,
+    tx: 2,
+};
 
 /// Collection Contract Structure
 /// This is the main contract structure that implements the NFT collection functionality
@@ -71,6 +76,10 @@ enum CollectionMessage {
     /// Mint a new orbital NFT
     #[opcode(77)]
     MintOrbital,
+
+    /// Withdraw payment tokens from contract
+    #[opcode(88)]
+    Withdraw,
 
     /// Get the name of the collection
     #[opcode(99)]
@@ -148,6 +157,7 @@ impl Collection {
         self.observe_initialization()?;
 
         // Initialize storage values
+        self.set_total_payments(0);
         self.set_instances_count(0);
         self.set_auth_mint_count(0);
 
@@ -200,7 +210,10 @@ impl Collection {
 
         // Check if the requested mint count plus current auth mint count doesn't exceed PREMINE_MINTS
         let current_auth_mints = self.get_auth_mint_count();
-        if current_auth_mints + count > PREMINE_MINTS {
+        let new_auth_mints = current_auth_mints.checked_add(count)
+            .ok_or_else(|| anyhow!("Auth mint count would overflow"))?;
+
+        if new_auth_mints > PREMINE_MINTS {
             return Err(anyhow!("Requested mint count {} plus current auth mints {} would exceed premine limit of {}", 
                 count, current_auth_mints, PREMINE_MINTS));
         }
@@ -213,7 +226,7 @@ impl Collection {
         }
 
         // Update the auth mint count
-        self.set_auth_mint_count(current_auth_mints + count);
+        self.set_auth_mint_count(new_auth_mints);
 
         response.alkanes.0.extend(minted_orbitals);
 
@@ -226,11 +239,56 @@ impl Collection {
     /// * `Result<CallResponse>` - Success or failure of minting operation
     fn mint_orbital(&self) -> Result<CallResponse> {
         let context = self.context()?;
-
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
-        self.observe_mint()?;
-        response.alkanes.0.push(self.create_mint_transfer()?);
+        let index = self.instances_count();
+        if index >= (self.max_mints() + PREMINE_MINTS) {
+            return Err(anyhow!("Minted out"));
+        }
+
+        // Check minting restrictions and process attempt
+        let current_height = self.height();
+        if MINT_START_BLOCK > 0 {
+            if current_height < MINT_START_BLOCK {
+                return Err(anyhow!("Minting has not started yet. Current block: {}, Start block: {}", current_height, MINT_START_BLOCK));
+            }
+        }
+
+        // Find the payment in the incoming alkanes
+        let mut payment_amount = 0u128;
+        for transfer in &context.incoming_alkanes.0 {
+            if transfer.id == PAYMENT_TOKEN_ID {
+                payment_amount = transfer.value;
+                break;
+            }
+        }
+
+        // Check if at least one orbital can be purchased
+        if payment_amount == 0 {
+            return Err(anyhow!("Insufficient payment"));
+        }
+
+        // Check if payment amount is sufficient
+        if payment_amount < MINT_PRICE {
+            return Err(anyhow!("Insufficient payment amount"));
+        }
+
+        // Mint NFT
+        let minted_orbital = self.create_mint_transfer()?;
+        response.alkanes.0.push(minted_orbital);
+
+        // Record payment amount
+        self.add_payment_amount(MINT_PRICE);
+
+        // Add change if any
+        let change = payment_amount.checked_sub(MINT_PRICE)
+            .ok_or_else(|| anyhow!("Payment calculation error"))?;
+        if change > 0 {
+            response.alkanes.0.push(AlkaneTransfer {
+                id: PAYMENT_TOKEN_ID,
+                value: change,
+            });
+        }
 
         Ok(response)
     }
@@ -241,8 +299,10 @@ impl Collection {
     /// * `Result<AlkaneTransfer>` - The transfer object or error
     fn create_mint_transfer(&self) -> Result<AlkaneTransfer> {
         let index = self.instances_count();
+        let max_total = self.max_mints().checked_add(PREMINE_MINTS)
+            .ok_or_else(|| anyhow!("Max total calculation overflow"))?;
 
-        if index >= (self.max_mints() + PREMINE_MINTS) {
+        if index >= max_total {
             return Err(anyhow!("Minted out"));
         }
 
@@ -292,64 +352,6 @@ impl Collection {
     /// Set authorized mint count
     fn set_auth_mint_count(&self, count: u128) {
         self.get_auth_mint_count_pointer().set_value(count);
-    }
-
-    /// Calculate a random value from transaction data
-    ///
-    /// Uses SHA256 hash of transaction data and block height to generate a random value
-    /// Takes first 16 bytes of hash as random number
-    ///
-    /// # Arguments
-    /// * `height` - Current block height
-    ///
-    /// # Returns
-    /// * `u128` - Random value derived from transaction and block height
-    fn calculate_random_from_tx(&self, height: u64) -> u128 {
-        let tx_data = self.transaction();
-        let height_bytes = height.to_le_bytes();
-
-        // Combine transaction data with block height
-        let mut combined_data = Vec::with_capacity(tx_data.len() + height_bytes.len());
-        combined_data.extend_from_slice(&tx_data);
-        combined_data.extend_from_slice(&height_bytes);
-
-        // Use bitcoin_hashes SHA256 to hash the combined data
-        let hash = sha256::Hash::hash(&combined_data);
-        let result = hash.to_byte_array();
-
-        // Use the first 16 bytes of the hash result as a random value
-        let mut bytes = [0u8; 16];
-        bytes.copy_from_slice(&result[..16]);
-        u128::from_le_bytes(bytes)
-    }
-
-    /// Check minting restrictions and process attempt
-    ///
-    /// This function:
-    /// 1. Verifies block height requirements (if MINT_START_BLOCK > 0)
-    /// 2. Updates block statistics
-    /// 3. Calculates random value from transaction
-    /// 4. Determines minting success based on SUCCESS_RATE percentage
-    ///
-    /// # Returns
-    /// * `Result<()>` - Success or failure of minting attempt
-    fn observe_mint(&self) -> Result<()> {
-        // Check if current block height has reached start block (if MINT_START_BLOCK > 0)
-        let current_height = self.height();
-        if MINT_START_BLOCK > 0 {
-            if current_height < MINT_START_BLOCK {
-                return Err(anyhow!("Minting has not started yet. Current block: {}, Start block: {}", current_height, MINT_START_BLOCK));
-            }
-        }
-
-        // Determine minting success based on SUCCESS_RATE percentage
-        let random_value = self.calculate_random_from_tx(current_height);
-        let success = (random_value % 100) < SUCCESS_RATE;
-        if success {
-            Ok(())
-        } else {
-            Err(anyhow!("The transaction {} was not matched.", random_value))
-        }
     }
 
     /// Get instance storage pointer
@@ -496,6 +498,71 @@ impl Collection {
         let attributes = SvgGenerator::get_attributes(index)?;
         response.data = attributes.into_bytes();
         Ok(response)
+    }
+
+    /// Withdraw payment tokens from contract
+    ///
+    /// This function:
+    /// 1. Verifies that the caller is the contract owner using collection token
+    /// 2. Transfers all payment tokens to the caller
+    ///
+    /// # Returns
+    /// * `Result<CallResponse>` - Success or failure of withdrawal operation
+    fn withdraw(&self) -> Result<CallResponse> {
+        let context = self.context()?;
+        let mut response = CallResponse::forward(&context.incoming_alkanes);
+
+        // Verify authority using collection token
+        if context.incoming_alkanes.0.len() != 1 {
+            return Err(anyhow!("did not authenticate with only the collection token"));
+        }
+
+        let transfer = context.incoming_alkanes.0[0].clone();
+        if transfer.id != context.myself.clone() {
+            return Err(anyhow!("supplied alkane is not collection token"));
+        }
+
+        if transfer.value < 1 {
+            return Err(anyhow!("less than 1 unit of collection token supplied to authenticate"));
+        }
+
+        // Get total payment amount from storage
+        let total_payments = self.get_total_payments();
+
+        // Transfer all payment tokens to caller
+        if total_payments > 0 {
+            response.alkanes.0.push(AlkaneTransfer {
+                id: PAYMENT_TOKEN_ID,
+                value: total_payments,
+            });
+            // Reset payment amount after successful withdrawal
+            self.set_total_payments(0);
+        }
+
+        Ok(response)
+    }
+
+    /// Get storage pointer for total payments
+    fn total_payments_pointer(&self) -> StoragePointer {
+        StoragePointer::from_keyword("/total_payments")
+    }
+
+    /// Get total payment amount
+    fn get_total_payments(&self) -> u128 {
+        self.total_payments_pointer().get_value::<u128>()
+    }
+
+    /// Set total payment amount
+    fn set_total_payments(&self, amount: u128) {
+        self.total_payments_pointer().set_value::<u128>(amount);
+    }
+
+    /// Add payment amount to total
+    fn add_payment_amount(&self, amount: u128) {
+        let current = self.get_total_payments();
+        let new_amount = current.checked_add(amount)
+            .expect("Payment total overflow");
+        self.set_total_payments(new_amount);
     }
 }
 
