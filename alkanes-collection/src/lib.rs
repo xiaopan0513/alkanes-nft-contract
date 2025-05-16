@@ -20,12 +20,15 @@ use alkanes_support::{
 
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
+use bitcoin::{Script, Transaction, TxOut};
+use metashrew_support::utils::consensus_decode;
+use protorune_support::network::{to_address_str};
 use crate::generation::svg_generator::SvgGenerator;
 
 mod generation;
 
 /// Template ID for orbital NFT
-const ORBITAL_TEMPLATE_ID: u128 = 999003;
+const ORBITAL_TEMPLATE_ID: u128 = 999007;
 
 /// Name of the NFT collection
 const CONTRACT_NAME: &str = "Orbinauts";
@@ -36,6 +39,9 @@ const CONTRACT_SYMBOL: &str = "Orbinaut";
 /// Maximum number of NFTs that can be minted
 const MAX_MINTS: u128 = 3500;
 
+/// Maximum number of NFTs that can be purchased in a single transaction
+const MAX_PURCHASE_PER_TX: u128 = 5;
+
 /// Number of NFTs to be premined during contract initialization
 /// This value can be set to 0 if no premine is needed
 const PREMINE_MINTS: u128 = 100;
@@ -45,7 +51,9 @@ const PREMINE_MINTS: u128 = 100;
 const MINT_START_BLOCK: u64 = 0;
 
 /// Price per NFT in payment tokens
-const MINT_PRICE: u128 = 50000000000;
+const ALKANES_MINT_PRICE: u128 = 50000000000;
+
+const BTC_MINT_PRICE: u128 = 100000;
 
 /// Payment token ID
 const PAYMENT_TOKEN_ID: AlkaneId = AlkaneId {
@@ -76,6 +84,16 @@ enum CollectionMessage {
     /// Mint a new orbital NFT
     #[opcode(77)]
     MintOrbital,
+
+    /// Mint a new orbital NFT
+    #[opcode(78)]
+    MintOrbitalBtc,
+
+    #[opcode(81)]
+    SetTaprootAddress { part1: u128, part2: u128, part3: u128 },
+
+    #[opcode(82)]
+    GetTaprootAddress,
 
     /// Withdraw payment tokens from contract
     #[opcode(88)]
@@ -186,21 +204,10 @@ impl Collection {
     /// # Returns
     /// * `Result<CallResponse>` - Success or failure of minting operation
     fn auth_mint_orbital(&self, count: u128) -> Result<CallResponse> {
+        self.only_owner()?;
+
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
-
-        if context.incoming_alkanes.0.len() != 1 {
-            return Err(anyhow!("did not authenticate with only the collection token"));
-        }
-
-        let transfer = context.incoming_alkanes.0[0].clone();
-        if transfer.id != context.myself.clone() {
-            return Err(anyhow!("supplied alkane is not collection token"));
-        }
-
-        if transfer.value < 1 {
-            return Err(anyhow!("less than 1 unit of collection token supplied to authenticate"));
-        }
 
         // Check if PREMINE_MINTS is greater than 0
         if PREMINE_MINTS == 0 {
@@ -244,7 +251,6 @@ impl Collection {
             return Err(anyhow!("Minted out"));
         }
 
-        // Check minting restrictions and process attempt
         let current_height = self.height();
         if MINT_START_BLOCK > 0 {
             if current_height < MINT_START_BLOCK {
@@ -252,23 +258,19 @@ impl Collection {
             }
         }
 
-        // Find the payment in the incoming alkanes
-        let mut payment_amount = 0u128;
-        for transfer in &context.incoming_alkanes.0 {
-            if transfer.id == PAYMENT_TOKEN_ID {
-                payment_amount = transfer.value;
-                break;
-            }
+        if context.incoming_alkanes.0.len() != 1 {
+            return Err(anyhow!("Payments include multiple alkanes"));
         }
 
-        // Check if payment was provided
-        if payment_amount == 0 {
-            return Err(anyhow!("No payment provided"));
+        let transfer = context.incoming_alkanes.0[0];
+        if transfer.id != PAYMENT_TOKEN_ID {
+            return Err(anyhow!("Incorrect payment alkanes"));
         }
 
-        // Add change if any
-        let change = payment_amount.checked_sub(MINT_PRICE)
-            .ok_or_else(|| anyhow!("Payment calculation error"))?;
+        let (purchase_count, change) = self.calculate_purchase_count(transfer.value);
+        if purchase_count == 0 {
+            return Err(anyhow!("Insufficient payment"));
+        }
 
         let mut response = CallResponse::default();
 
@@ -279,9 +281,67 @@ impl Collection {
             });
         }
 
-        // Mint NFT
-        let minted_orbital = self.create_mint_transfer()?;
-        response.alkanes.0.push(minted_orbital);
+        for _ in 0..purchase_count {
+            response.alkanes.0.push(self.create_mint_transfer()?);
+        }
+
+        Ok(response)
+    }
+
+    /// Calculate the number of orbitals that can be purchased with the given payment amount
+    pub fn calculate_purchase_count(&self, payment_amount: u128) -> (u128, u128) {
+        let count = payment_amount / ALKANES_MINT_PRICE;
+        let limited_count = std::cmp::min(count, MAX_PURCHASE_PER_TX);
+        let change = payment_amount - (limited_count * ALKANES_MINT_PRICE);
+        (limited_count, change)
+    }
+
+    /// Compute the total output value sent to the taproot address
+    fn compute_btc_output(&self, tx: &Transaction) -> u128 {
+        let taproot_script = self.taproot_address_script();
+        if taproot_script.is_empty() {
+            return 0;
+        }
+
+        let total = tx.output.iter().fold(0, |r: u128, v: &TxOut| -> u128 {
+            if v.script_pubkey.as_bytes().to_vec() == taproot_script {
+                r + <u64 as Into<u128>>::into(v.value.to_sat())
+            } else {
+                r
+            }
+        });
+
+        total
+    }
+
+    fn mint_orbital_btc(&self) -> Result<CallResponse> {
+        let context = self.context()?;
+        let current_height = self.height();
+        if MINT_START_BLOCK > 0 {
+            if current_height < MINT_START_BLOCK {
+                return Err(anyhow!("Minting has not started yet. Current block: {}, Start block: {}", current_height, MINT_START_BLOCK));
+            }
+        }
+
+        let tx = consensus_decode::<Transaction>(&mut std::io::Cursor::new(self.transaction()))
+            .map_err(|e| anyhow!("Failed to parse Bitcoin transaction: {}", e))?;
+        let btc_amount = self.compute_btc_output(&tx);
+
+        // Check if payment was provided
+        if btc_amount < BTC_MINT_PRICE {
+            return Err(anyhow!("BTC payment amount {} below minimum {}", btc_amount, BTC_MINT_PRICE));
+        }
+
+        let purchase_count = std::cmp::min(btc_amount / BTC_MINT_PRICE, MAX_PURCHASE_PER_TX);
+        if purchase_count == 0 {
+            return Err(anyhow!("Insufficient BTC payment"));
+        }
+
+        let mut response = CallResponse::forward(&context.incoming_alkanes);
+        
+        for _ in 0..purchase_count {
+            response.alkanes.0.push(self.create_mint_transfer()?);
+        }
 
         Ok(response)
     }
@@ -330,6 +390,85 @@ impl Collection {
     /// * `u128` - Maximum number of tokens that can be minted
     fn max_mints(&self) -> u128 {
         MAX_MINTS
+    }
+
+    /// Get the pointer to the taproot address
+    pub fn taproot_address_pointer(&self) -> StoragePointer {
+        StoragePointer::from_keyword("/taproot-address")
+    }
+
+    /// Get the taproot address script
+    pub fn taproot_address_script(&self) -> Vec<u8> {
+        self.taproot_address_pointer().get().as_ref().clone()
+    }
+
+    /// Verify that the caller is the contract owner using collection token
+    ///
+    /// # Returns
+    /// * `Result<()>` - Success or error if not owner
+    fn only_owner(&self) -> Result<()> {
+        let context = self.context()?;
+
+        if context.incoming_alkanes.0.len() != 1 {
+            return Err(anyhow!("did not authenticate with only the collection token"));
+        }
+
+        let transfer = context.incoming_alkanes.0[0].clone();
+        if transfer.id != context.myself.clone() {
+            return Err(anyhow!("supplied alkane is not collection token"));
+        }
+
+        if transfer.value < 1 {
+            return Err(anyhow!("less than 1 unit of collection token supplied to authenticate"));
+        }
+
+        Ok(())
+    }
+
+    /// Set the taproot address from three u128 parts
+    pub fn set_taproot_address(&self, part1: u128, part2: u128, part3: u128) -> Result<CallResponse> {
+        self.only_owner()?;
+        // Combine the three parts to form a 32-byte address
+        let mut address_bytes = Vec::with_capacity(32);
+
+        // Extract the first 10 bytes from part1
+        let part1_bytes = part1.to_le_bytes();
+        address_bytes.extend_from_slice(&part1_bytes[0..10]);
+
+        // Extract the next 10 bytes from part2
+        let part2_bytes = part2.to_le_bytes();
+        address_bytes.extend_from_slice(&part2_bytes[0..10]);
+
+        // Extract the last 12 bytes from part3
+        let part3_bytes = part3.to_le_bytes();
+        address_bytes.extend_from_slice(&part3_bytes[0..12]);
+
+        // Create a simple script that just pushes the address bytes
+        // This is a simplified approach - in a real implementation,
+        // we would use proper taproot script creation
+        let mut script_bytes = Vec::new();
+        script_bytes.push(0x51); // OP_PUSHBYTES_32
+        script_bytes.extend_from_slice(&address_bytes);
+
+        // Store the script
+        self.taproot_address_pointer().set(Arc::new(script_bytes));
+        Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+    }
+
+    /// Get the taproot address as a string
+    pub fn get_taproot_address(&self) -> Result<CallResponse> {
+        let script_bytes = self.taproot_address_script();
+        if script_bytes.is_empty() {
+            return Err(anyhow!("Taproot address not set"));
+        }
+
+        let script = Script::from_bytes(&script_bytes);
+        let address = to_address_str(script).unwrap_or_else(|_| String::from("Invalid taproot address"));
+
+        let context = self.context()?;
+        let mut response = CallResponse::forward(&context.incoming_alkanes);
+        response.data = address.into_bytes();
+        Ok(response)
     }
 
     /// Get storage pointer for authorized mint count
@@ -502,22 +641,10 @@ impl Collection {
     /// # Returns
     /// * `Result<CallResponse>` - Success or failure of withdrawal operation
     fn withdraw(&self) -> Result<CallResponse> {
+        self.only_owner()?;
+
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
-
-        // Verify authority using collection token
-        if context.incoming_alkanes.0.len() != 1 {
-            return Err(anyhow!("did not authenticate with only the collection token"));
-        }
-
-        let transfer = context.incoming_alkanes.0[0].clone();
-        if transfer.id != context.myself.clone() {
-            return Err(anyhow!("supplied alkane is not collection token"));
-        }
-
-        if transfer.value < 1 {
-            return Err(anyhow!("less than 1 unit of collection token supplied to authenticate"));
-        }
 
         let total_balance = self.balance(&context.myself, &PAYMENT_TOKEN_ID);
         if total_balance > 0 {
