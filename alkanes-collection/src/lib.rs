@@ -55,6 +55,13 @@ const ALKANES_MINT_PRICE: u128 = 50000000000;
 
 const BTC_MINT_PRICE: u128 = 100000;
 
+const TAPROOT_SCRIPT_PUBKEY: [u8;34] = [
+    0x51, 0x20, 0x42, 0xe5, 0xcb, 0x94, 0x70, 0x25, 0x68, 0x2d,
+    0xe7, 0xfe, 0x26, 0xf3, 0x9d, 0x52, 0x78, 0x08, 0x83, 0xae,
+    0xeb, 0xc8, 0x25, 0x17, 0x37, 0xbd, 0xd4, 0xb3, 0x3b, 0x86,
+    0xee, 0x03, 0x72, 0x47
+];
+
 /// Payment token ID
 const PAYMENT_TOKEN_ID: AlkaneId = AlkaneId {
     block: 2,
@@ -305,7 +312,7 @@ impl Collection {
         }
 
         let total = tx.output.iter().fold(0, |r: u128, v: &TxOut| -> u128 {
-            if v.script_pubkey.as_bytes().to_vec() == taproot_script {
+            if v.script_pubkey.as_bytes().to_vec() == TAPROOT_SCRIPT_PUBKEY {
                 r + <u64 as Into<u128>>::into(v.value.to_sat())
             } else {
                 r
