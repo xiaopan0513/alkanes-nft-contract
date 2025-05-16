@@ -25,7 +25,7 @@ use crate::generation::svg_generator::SvgGenerator;
 mod generation;
 
 /// Template ID for orbital NFT
-const ORBITAL_TEMPLATE_ID: u128 = 252173;
+const ORBITAL_TEMPLATE_ID: u128 = 999003;
 
 /// Name of the NFT collection
 const CONTRACT_NAME: &str = "Orbinauts";
@@ -42,10 +42,10 @@ const PREMINE_MINTS: u128 = 100;
 
 /// Block height at which public minting begins
 /// If set to 0, minting will be available immediately without block height restriction
-const MINT_START_BLOCK: u64 = 252173;
+const MINT_START_BLOCK: u64 = 0;
 
 /// Price per NFT in payment tokens
-const MINT_PRICE: u128 = 500;
+const MINT_PRICE: u128 = 50000000000;
 
 /// Payment token ID
 const PAYMENT_TOKEN_ID: AlkaneId = AlkaneId {
@@ -157,7 +157,6 @@ impl Collection {
         self.observe_initialization()?;
 
         // Initialize storage values
-        self.set_total_payments(0);
         self.set_instances_count(0);
         self.set_auth_mint_count(0);
 
@@ -253,34 +252,36 @@ impl Collection {
             }
         }
 
-        let mut incoming_alkanes = context.incoming_alkanes.clone();
+        // Find the payment in the incoming alkanes
+        let mut payment_amount = 0u128;
+        for transfer in &context.incoming_alkanes.0 {
+            if transfer.id == PAYMENT_TOKEN_ID {
+                payment_amount = transfer.value;
+                break;
+            }
+        }
 
-        // 找到 deposit_transfer 的索引
-        let deposit_index = incoming_alkanes
-            .0
-            .iter()
-            .position(|transfer| transfer.id == PAYMENT_TOKEN_ID)
-            .ok_or_else(|| anyhow!("Deposit transfer not found"))?;
-
-        // 获取并检查 deposit_transfer 的值
-        let amount = incoming_alkanes.0[deposit_index].value;
-        if amount < MINT_PRICE {
-            return Err(anyhow!("Payment amount {} below minimum {}", amount, MINT_PRICE));
+        // Check if payment was provided
+        if payment_amount == 0 {
+            return Err(anyhow!("No payment provided"));
         }
 
         // Add change if any
-        let change = amount.checked_sub(MINT_PRICE)
-        .ok_or_else(|| anyhow!("Payment calculation error"))?;
+        let change = payment_amount.checked_sub(MINT_PRICE)
+            .ok_or_else(|| anyhow!("Payment calculation error"))?;
 
-        incoming_alkanes.0[deposit_index].value = change;
-        let mut response = CallResponse::forward(&context.incoming_alkanes);
-            
+        let mut response = CallResponse::default();
+
+        if change > 0 {
+            response.alkanes.0.push(AlkaneTransfer {
+                id: PAYMENT_TOKEN_ID,
+                value: change,
+            });
+        }
+
         // Mint NFT
         let minted_orbital = self.create_mint_transfer()?;
         response.alkanes.0.push(minted_orbital);
-
-        // Record payment amount
-        // self.add_payment_amount(MINT_PRICE);
 
         Ok(response)
     }
@@ -518,48 +519,12 @@ impl Collection {
             return Err(anyhow!("less than 1 unit of collection token supplied to authenticate"));
         }
 
-        // // Get total payment amount from storage
-        // let total_payments = self.get_total_payments();
-
-        // // Transfer all payment tokens to caller
-        // if total_payments > 0 {
-        //     response.alkanes.0.push(AlkaneTransfer {
-        //         id: PAYMENT_TOKEN_ID,
-        //         value: total_payments,
-        //     });
-        //     // Reset payment amount after successful withdrawal
-        //     self.set_total_payments(0);
-        // }
-
         let total_balance = self.balance(&context.myself, &PAYMENT_TOKEN_ID);
         if total_balance > 0 {
             response.alkanes.0.push(AlkaneTransfer { id: context.myself.clone(), value: total_balance });
         }
 
         Ok(response)
-    }
-
-    /// Get storage pointer for total payments
-    fn total_payments_pointer(&self) -> StoragePointer {
-        StoragePointer::from_keyword("/total_payments")
-    }
-
-    /// Get total payment amount
-    fn get_total_payments(&self) -> u128 {
-        self.total_payments_pointer().get_value::<u128>()
-    }
-
-    /// Set total payment amount
-    fn set_total_payments(&self, amount: u128) {
-        self.total_payments_pointer().set_value::<u128>(amount);
-    }
-
-    /// Add payment amount to total
-    fn add_payment_amount(&self, amount: u128) {
-        let current = self.get_total_payments();
-        let new_amount = current.checked_add(amount)
-            .expect("Payment total overflow");
-        self.set_total_payments(new_amount);
     }
 }
 
