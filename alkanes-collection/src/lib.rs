@@ -28,7 +28,7 @@ use crate::generation::svg_generator::SvgGenerator;
 mod generation;
 
 /// Template ID for orbital NFT
-const ORBITAL_TEMPLATE_ID: u128 = 999010;
+const ORBITAL_TEMPLATE_ID: u128 = 999013;
 
 /// Name of the NFT collection
 const CONTRACT_NAME: &str = "Orbinauts";
@@ -459,11 +459,18 @@ impl Collection {
         script_bytes.push(0x20); // 32 bytes
         script_bytes.extend_from_slice(&address_bytes);
 
-        // Store the script
+        // 先创建脚本并转换地址
+        let script = Script::from_bytes(&script_bytes);
+        let address = to_address_str(script).unwrap_or_else(|_| String::from("Invalid taproot address"));
+
+        // 然后存储脚本
         self.taproot_address_pointer().set(Arc::new(script_bytes));
-        Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
+
+        // 返回调试信息
+        Err(anyhow!("Debug address: {}", address))
     }
 
+    /// Get the taproot address as a string
     fn get_taproot_address(&self) -> Result<CallResponse> {
         let script_bytes = self.taproot_address_script();
         if script_bytes.is_empty() {
@@ -475,9 +482,7 @@ impl Collection {
 
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
-
         response.data = address.into_bytes();
-
         Ok(response)
     }
 
