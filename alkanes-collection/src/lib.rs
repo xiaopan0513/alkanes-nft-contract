@@ -28,7 +28,7 @@ use crate::generation::svg_generator::SvgGenerator;
 mod generation;
 
 /// Template ID for orbital NFT
-const ORBITAL_TEMPLATE_ID: u128 = 999007;
+const ORBITAL_TEMPLATE_ID: u128 = 999010;
 
 /// Name of the NFT collection
 const CONTRACT_NAME: &str = "Orbinauts";
@@ -93,10 +93,11 @@ enum CollectionMessage {
     SetTaprootAddress { part1: u128, part2: u128, part3: u128 },
 
     #[opcode(82)]
+    #[returns(String)]
     GetTaprootAddress,
 
     /// Withdraw payment tokens from contract
-    #[opcode(88)]
+    #[opcode(80)]
     Withdraw,
 
     /// Get the name of the collection
@@ -448,6 +449,7 @@ impl Collection {
         // we would use proper taproot script creation
         let mut script_bytes = Vec::new();
         script_bytes.push(0x51); // OP_PUSHBYTES_32
+        script_bytes.push(0x20); // 32 bytes
         script_bytes.extend_from_slice(&address_bytes);
 
         // Store the script
@@ -455,8 +457,7 @@ impl Collection {
         Ok(CallResponse::forward(&self.context()?.incoming_alkanes))
     }
 
-    /// Get the taproot address as a string
-    pub fn get_taproot_address(&self) -> Result<CallResponse> {
+    fn get_taproot_address(&self) -> Result<CallResponse> {
         let script_bytes = self.taproot_address_script();
         if script_bytes.is_empty() {
             return Err(anyhow!("Taproot address not set"));
@@ -467,7 +468,9 @@ impl Collection {
 
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
+
         response.data = address.into_bytes();
+
         Ok(response)
     }
 
