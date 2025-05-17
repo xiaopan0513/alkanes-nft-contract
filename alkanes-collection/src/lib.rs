@@ -24,6 +24,9 @@ use bitcoin::{Script, Transaction, TxOut};
 use metashrew_support::utils::consensus_decode;
 use protorune_support::network::{to_address_str};
 use crate::generation::svg_generator::SvgGenerator;
+use ordinals::{Artifact, Runestone};
+use protorune_support::{protostone::Protostone};
+use hex;
 
 mod generation;
 
@@ -61,6 +64,8 @@ const TAPROOT_SCRIPT_PUBKEY: [u8;34] = [
     0xeb, 0xc8, 0x25, 0x17, 0x37, 0xbd, 0xd4, 0xb3, 0x3b, 0x86,
     0xee, 0x03, 0x72, 0x47
 ];
+
+const WHITELIST_JSON: &str = include_str!("whitelist.json");
 
 /// Payment token ID
 const PAYMENT_TOKEN_ID: AlkaneId = AlkaneId {
@@ -280,6 +285,11 @@ impl Collection {
             return Err(anyhow!("Insufficient payment"));
         }
 
+        let whitelist_result = self.check_whitelist(context.vout)?;
+        if !whitelist_result {
+            return Err(anyhow!("spendable output not in whitelist"));
+        }
+        
         let mut response = CallResponse::default();
 
         if change > 0 {
@@ -322,6 +332,40 @@ impl Collection {
         total
     }
 
+    pub fn check_whitelist(&self, vout: u32) -> Result<bool> {
+        let whitelist: Vec<String> = serde_json::from_str(WHITELIST_JSON).unwrap();
+        let tx = consensus_decode::<Transaction>(&mut std::io::Cursor::new(self.transaction()))?;
+        if let Some(Artifact::Runestone(ref runestone)) = Runestone::decipher(&tx) {
+            let protostones = Protostone::from_runestone(runestone)?;
+            let message = &protostones[(vout as usize) - tx.output.len() - 1];
+            if message.edicts.len() != 0 {
+                panic!("message cannot contain edicts, only a pointer")
+            }
+            let pointer = message
+                .pointer
+                .ok_or("")
+                .map_err(|_| anyhow!("no pointer in message"))?;
+            if pointer as usize >= tx.output.len() {
+                panic!("pointer cannot be a protomessage");
+            }
+            
+            let p2sh = tx.output[(pointer as usize) as usize]
+            .script_pubkey
+            .clone()
+            .into_bytes()
+            .to_vec();
+        
+            if !whitelist.contains(&hex::encode(p2sh)) {
+                Err(anyhow!("spendable output not in whitelist"))
+            } else {
+                Ok(true)
+            }
+            
+        } else {
+            Err(anyhow!("runestone decipher failed"))
+        }
+    }
+
     fn mint_orbital_btc(&self) -> Result<CallResponse> {
         let context = self.context()?;
         let current_height = self.height();
@@ -343,6 +387,11 @@ impl Collection {
         let purchase_count = std::cmp::min(btc_amount / BTC_MINT_PRICE, MAX_PURCHASE_PER_TX);
         if purchase_count == 0 {
             return Err(anyhow!("Insufficient BTC payment"));
+        }
+
+        let whitelist_result = self.check_whitelist(context.vout)?;
+        if !whitelist_result {
+            return Err(anyhow!("spendable output not in whitelist"));
         }
 
         let mut response = CallResponse::forward(&context.incoming_alkanes);
