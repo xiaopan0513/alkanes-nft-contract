@@ -18,6 +18,7 @@ anyhow = "1.0.94"
 bitcoin = { version = "0.32.4", features = ["rand"] }
 serde_json = "1.0.140"
 hex = "0.4.3"
+rs_merkle = "1.5.0"
 
 [dev-dependencies]
 once_cell = "1.19.0"

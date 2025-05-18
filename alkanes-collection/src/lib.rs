@@ -8,6 +8,9 @@
 
 use metashrew_support::index_pointer::KeyValuePointer;
 use metashrew_support::compat::to_arraybuffer_layout;
+use metashrew_support::{
+    utils::{consume_exact, consume_sized_int, consume_to_end},
+};
 use alkanes_runtime::{
     declare_alkane, message::MessageDispatch, storage::StoragePointer, token::Token,
     runtime::AlkaneResponder,
@@ -15,7 +18,7 @@ use alkanes_runtime::{
 
 use alkanes_support::{
     cellpack::Cellpack, id::AlkaneId,
-    parcel::{AlkaneTransfer, AlkaneTransferParcel}, response::CallResponse,
+    parcel::{AlkaneTransfer, AlkaneTransferParcel}, response::CallResponse,witness::find_witness_payload,
 };
 
 use anyhow::{anyhow, Result};
@@ -27,6 +30,9 @@ use crate::generation::svg_generator::SvgGenerator;
 use ordinals::{Artifact, Runestone};
 use protorune_support::{protostone::Protostone};
 use hex;
+use std::collections::HashSet;
+use std::io::Cursor;
+use rs_merkle::{algorithms::Sha256, Hasher, MerkleProof};
 
 mod generation;
 
@@ -72,6 +78,13 @@ const PAYMENT_TOKEN_ID: AlkaneId = AlkaneId {
     block: 2,
     tx: 2,
 };
+
+const MERKLE_ROOT: [u8; 32] = [
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+];
+
+const MERKLE_LEAF_COUNT: u128 = 0;
 
 /// Collection Contract Structure
 /// This is the main contract structure that implements the NFT collection functionality
@@ -459,6 +472,17 @@ impl Collection {
         self.taproot_address_pointer().get().as_ref().clone()
     }
 
+
+    // pub fn get_mint_pubkey(&self) -> Result<CallResponse> {
+    //     let context = self.context()?;
+    //     let mut response = CallResponse::forward(&context.incoming_alkanes);
+    //     response.data = self.mint_pubkey_script();
+    //     Ok(response)
+    // }
+
+    // pub fn mint_pubkey_script(&self) -> Vec<u8> {
+    //     self.mint_pubkey_pointer().get().as_ref().clone()
+    // }
     /// Verify that the caller is the contract owner using collection token
     ///
     /// # Returns
@@ -717,6 +741,90 @@ impl Collection {
 
         Ok(response)
     }
+
+    fn minted_pubkey_pointer(&self) -> StoragePointer {
+        StoragePointer::from_keyword("/minted-pubkey")
+    }
+
+    fn get_minted_pubkey_set(&self) -> Result<HashSet<Vec<u8>>> {
+        let data = self.minted_pubkey_pointer().get();
+        if data.as_ref().is_empty() {
+            Ok(HashSet::new())
+        } else {
+            serde_json::from_slice(data.as_ref())
+                .map_err(|e| anyhow!("Failed to deserialize whitelist: {}", e))
+        }
+    }
+
+    fn save_minted_pubkey_set(&self, minted_set: &HashSet<Vec<u8>>) -> Result<()> {
+        let json = serde_json::to_vec(minted_set)
+            .map_err(|e| anyhow!("Failed to serialize whitelist: {}", e))?;
+        self.minted_pubkey_pointer().set(Arc::new(json));
+        Ok(())
+    }
+
+    //用这个替换check_whitelist 就是用merkle proof 验证
+    pub fn verify_minted_pubkey(&self, vout: u32) -> Result<bool> {
+
+        let mut minted_set: HashSet<Vec<u8>> = self.get_minted_pubkey_set()?;
+
+        let tx = consensus_decode::<Transaction>(&mut std::io::Cursor::new(self.transaction()))?;
+        if let Some(Artifact::Runestone(ref runestone)) = Runestone::decipher(&tx) {
+            let protostones = Protostone::from_runestone(runestone)?;
+            let message = &protostones[(vout as usize) - tx.output.len() - 1];
+            if message.edicts.len() != 0 {
+                panic!("message cannot contain edicts, only a pointer")
+            }
+            let pointer = message
+                .pointer
+                .ok_or("")
+                .map_err(|_| anyhow!("no pointer in message"))?;
+            if pointer as usize >= tx.output.len() {
+                panic!("pointer cannot be a protomessage");
+            }
+            
+            let output_script = tx.output[(pointer as usize) as usize]
+            .script_pubkey
+            .clone()
+            .into_bytes()
+            .to_vec();
+            if !minted_set.contains(&output_script) {
+
+                let mut cursor: Cursor<Vec<u8>> =
+                Cursor::<Vec<u8>>::new(find_witness_payload(&tx, 0).ok_or("").map_err(|_| {
+                    anyhow!("merkle-distributor: witness envelope at index 0 does not contain data")
+                })?);
+                let leaf = consume_exact(&mut cursor, output_script.len()+4)?;
+                let leaf_hash = Sha256::hash(&leaf);
+                let proof = consume_to_end(&mut cursor)?;
+                let mut leaf_cursor = Cursor::new(leaf.clone());
+                let script = consume_exact(&mut leaf_cursor, output_script.len())?;
+                let index = consume_sized_int::<u32>(&mut leaf_cursor)? as usize;
+
+                if script == output_script {
+                if MerkleProof::<Sha256>::try_from(proof)?.verify(
+                    MERKLE_ROOT,
+                    &[index],
+                    &[leaf_hash],
+                    MERKLE_LEAF_COUNT as usize,
+                ) {
+                    minted_set.insert(output_script);
+                    self.save_minted_pubkey_set(&minted_set)?;
+                    Ok(true) 
+                } else {
+                    Err(anyhow!("proof verification failure"))
+                }
+                } else {
+                    Err(anyhow!("output_script does not match proof"))
+                }
+            } else {
+                Err(anyhow!("output_script already minted"))
+            }
+        } else {
+            Err(anyhow!("runestone decipher failed"))
+        }
+    }
+
 }
 
 declare_alkane! {
