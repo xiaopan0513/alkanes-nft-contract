@@ -665,6 +665,7 @@ impl Collection {
 
     //用这个替换check_whitelist 就是用merkle proof 验证
     pub fn verify_minted_pubkey(&self, count: u128) -> Result<bool> {
+        let context = self.context()?;
         let tx = consensus_decode::<Transaction>(&mut std::io::Cursor::new(self.transaction()))?;
 
         let output_script = tx.output[0]
@@ -694,8 +695,14 @@ impl Collection {
                 &[leaf_hash],
                 MERKLE_LEAF_COUNT as usize,
             ) {
-                self.add_script_minted_count(index, count, limit as u128)?;
-                Ok(true)
+                let new_balance = self.balance(&context.caller, &context.myself).checked_add(count).ok_or_else(|| anyhow!("balance overflow"))?;
+                if new_balance > limit as u128 {
+                    return Err(anyhow!("minted count exceeds limit"));
+                } else {
+                    Ok(true)
+                }
+                //不确定上面余额校验的逻辑是否正确。 如果有问题的话，需要用下面的逻辑
+                // self.add_script_minted_count(index, count, limit as u128)?;
             } else {
                 Err(anyhow!("proof verification failure"))
             }
