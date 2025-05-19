@@ -648,9 +648,23 @@ impl Collection {
         Ok(())
     }
 
+    fn script_minted_count_pointer(&self,index:u32) -> StoragePointer {
+        StoragePointer::from_keyword(format!("/minted-pubkey-{}", index).as_str())
+    }
+
+    fn add_script_minted_count(&self,index:u32, add_count:u128,limit: u128) -> Result<()> {
+        let mut pointer = self.script_minted_count_pointer(index);
+        let current_count = pointer.get_value::<u128>();
+        let new_count = current_count.checked_add(add_count).ok_or_else(|| anyhow!("minted count overflow"))?;
+        if new_count > limit {
+            return Err(anyhow!("minted count exceeds limit"));
+        }
+        pointer.set_value::<u128>(new_count);
+        Ok(())
+    }
+
     //用这个替换check_whitelist 就是用merkle proof 验证
     pub fn verify_minted_pubkey(&self, count: u128) -> Result<bool> {
-        let mut minted_set: HashSet<Vec<u8>> = self.get_minted_pubkey_set()?;
         let tx = consensus_decode::<Transaction>(&mut std::io::Cursor::new(self.transaction()))?;
 
         let output_script = tx.output[0]
@@ -659,38 +673,36 @@ impl Collection {
             .into_bytes()
             .to_vec();
 
-        if !minted_set.contains(&output_script) {
-            let mut cursor: Cursor<Vec<u8>> =
-                Cursor::<Vec<u8>>::new(find_witness_payload(&tx, 0).ok_or("").map_err(|_| {
-                    anyhow!("merkle-distributor: witness envelope at index 0 does not contain data")
-                })?);
+        let mut cursor: Cursor<Vec<u8>> =
+        Cursor::<Vec<u8>>::new(find_witness_payload(&tx, 0).ok_or("").map_err(|_| {
+            anyhow!("merkle-distributor: witness envelope at index 0 does not contain data")
+        })?);
 
-            let leaf = consume_exact(&mut cursor, output_script.len() + 4)?;
-            let leaf_hash = Sha256::hash(&leaf);
-            let proof = consume_to_end(&mut cursor)?;
-            let mut leaf_cursor = Cursor::new(leaf.clone());
-            let script = consume_exact(&mut leaf_cursor, output_script.len())?;
-            let index = consume_sized_int::<u32>(&mut leaf_cursor)? as usize;
+        let leaf = consume_exact(&mut cursor, output_script.len() + 8)?;
+        let leaf_hash = Sha256::hash(&leaf);
+        let proof = consume_to_end(&mut cursor)?;
+        let mut leaf_cursor = Cursor::new(leaf.clone());
+        let script = consume_exact(&mut leaf_cursor, output_script.len())?;
+        let index = consume_sized_int::<u32>(&mut leaf_cursor)?;
+        let limit = consume_sized_int::<u32>(&mut leaf_cursor)?;
 
-            if script == output_script {
-                if MerkleProof::<Sha256>::try_from(proof)?.verify(
-                    MERKLE_ROOT,
-                    &[index],
-                    &[leaf_hash],
-                    MERKLE_LEAF_COUNT as usize,
-                ) {
-                    minted_set.insert(output_script);
-                    self.save_minted_pubkey_set(&minted_set)?;
-                    Ok(true)
-                } else {
-                    Err(anyhow!("proof verification failure"))
-                }
+    
+        if script == output_script {
+            if MerkleProof::<Sha256>::try_from(proof)?.verify(
+                MERKLE_ROOT,
+                &[index as usize],
+                &[leaf_hash],
+                MERKLE_LEAF_COUNT as usize,
+            ) {
+                self.add_script_minted_count(index, count, limit as u128)?;
+                Ok(true)
             } else {
-                Err(anyhow!("output_script does not match proof"))
+                Err(anyhow!("proof verification failure"))
             }
         } else {
-            Err(anyhow!("output_script already minted"))
+            Err(anyhow!("output_script does not match proof"))
         }
+
     }
 }
 
