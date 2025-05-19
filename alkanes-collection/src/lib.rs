@@ -6,33 +6,27 @@
 //! - Lottery-based minting success rate
 //! - SVG-based token generation
 
-use metashrew_support::index_pointer::KeyValuePointer;
-use metashrew_support::compat::to_arraybuffer_layout;
-use metashrew_support::{
-    utils::{consume_exact, consume_sized_int, consume_to_end},
-};
 use alkanes_runtime::{
-    declare_alkane, message::MessageDispatch, storage::StoragePointer, token::Token,
-    runtime::AlkaneResponder,
+    declare_alkane, message::MessageDispatch, runtime::AlkaneResponder, storage::StoragePointer,
+    token::Token,
 };
+use metashrew_support::compat::to_arraybuffer_layout;
+use metashrew_support::index_pointer::KeyValuePointer;
+use metashrew_support::utils::{consume_exact, consume_sized_int, consume_to_end};
 
 use alkanes_support::{
     cellpack::Cellpack, id::AlkaneId,
-    parcel::{AlkaneTransfer, AlkaneTransferParcel}, response::CallResponse,witness::find_witness_payload,
+    parcel::{AlkaneTransfer, AlkaneTransferParcel}, response::CallResponse, witness::find_witness_payload,
 };
 
-use anyhow::{anyhow, Result};
-use std::sync::Arc;
-use bitcoin::{Script, Transaction, TxOut};
-use metashrew_support::utils::consensus_decode;
-use protorune_support::network::{to_address_str};
 use crate::generation::svg_generator::SvgGenerator;
-use ordinals::{Artifact, Runestone};
-use protorune_support::{protostone::Protostone};
-use hex;
+use anyhow::{anyhow, Result};
+use bitcoin::{Transaction, TxOut};
+use metashrew_support::utils::consensus_decode;
+use rs_merkle::{algorithms::Sha256, Hasher, MerkleProof};
 use std::collections::HashSet;
 use std::io::Cursor;
-use rs_merkle::{algorithms::Sha256, Hasher, MerkleProof};
+use std::sync::Arc;
 
 mod generation;
 
@@ -64,19 +58,17 @@ const ALKANES_MINT_PRICE: u128 = 50000000000;
 
 const BTC_MINT_PRICE: u128 = 100000;
 
-const TAPROOT_SCRIPT_PUBKEY: [u8;34] = [
+const TAPROOT_SCRIPT_PUBKEY: [u8; 34] = [
     0x51, 0x20, 0x42, 0xe5, 0xcb, 0x94, 0x70, 0x25, 0x68, 0x2d,
     0xe7, 0xfe, 0x26, 0xf3, 0x9d, 0x52, 0x78, 0x08, 0x83, 0xae,
     0xeb, 0xc8, 0x25, 0x17, 0x37, 0xbd, 0xd4, 0xb3, 0x3b, 0x86,
     0xee, 0x03, 0x72, 0x47
 ];
 
-const WHITELIST_JSON: &str = include_str!("whitelist.json");
-
 /// Payment token ID
 const PAYMENT_TOKEN_ID: AlkaneId = AlkaneId {
     block: 2,
-    tx: 2,
+    tx: 1,
 };
 
 const MERKLE_ROOT: [u8; 32] = [
@@ -113,13 +105,6 @@ enum CollectionMessage {
     /// Mint a new orbital NFT
     #[opcode(78)]
     MintOrbitalBtc,
-
-    #[opcode(81)]
-    SetTaprootAddress { part1: u128, part2: u128, part3: u128 },
-
-    #[opcode(82)]
-    #[returns(String)]
-    GetTaprootAddress,
 
     /// Withdraw payment tokens from contract
     #[opcode(80)]
@@ -265,24 +250,9 @@ impl Collection {
         Ok(response)
     }
 
-    /// Public mint function for orbitals
-    ///
-    /// # Returns
-    /// * `Result<CallResponse>` - Success or failure of minting operation
+    /// Public mint function for orbitals using Alkanes
     fn mint_orbital(&self) -> Result<CallResponse> {
         let context = self.context()?;
-
-        let index = self.instances_count();
-        if index >= (self.max_mints() + PREMINE_MINTS) {
-            return Err(anyhow!("Minted out"));
-        }
-
-        let current_height = self.height();
-        if MINT_START_BLOCK > 0 {
-            if current_height < MINT_START_BLOCK {
-                return Err(anyhow!("Minting has not started yet. Current block: {}, Start block: {}", current_height, MINT_START_BLOCK));
-            }
-        }
 
         if context.incoming_alkanes.0.len() != 1 {
             return Err(anyhow!("Payments include multiple alkanes"));
@@ -298,11 +268,9 @@ impl Collection {
             return Err(anyhow!("Insufficient payment"));
         }
 
-        let whitelist_result = self.check_whitelist(context.vout)?;
-        if !whitelist_result {
-            return Err(anyhow!("spendable output not in whitelist"));
-        }
-        
+        // Run common pre-mint checks
+        self.check_mint_prerequisites(purchase_count)?;
+
         let mut response = CallResponse::default();
 
         if change > 0 {
@@ -319,74 +287,9 @@ impl Collection {
         Ok(response)
     }
 
-    /// Calculate the number of orbitals that can be purchased with the given payment amount
-    pub fn calculate_purchase_count(&self, payment_amount: u128) -> (u128, u128) {
-        let count = payment_amount / ALKANES_MINT_PRICE;
-        let limited_count = std::cmp::min(count, MAX_PURCHASE_PER_TX);
-        let change = payment_amount - (limited_count * ALKANES_MINT_PRICE);
-        (limited_count, change)
-    }
-
-    /// Compute the total output value sent to the taproot address
-    fn compute_btc_output(&self, tx: &Transaction) -> u128 {
-        let taproot_script = self.taproot_address_script();
-        if taproot_script.is_empty() {
-            return 0;
-        }
-
-        let total = tx.output.iter().fold(0, |r: u128, v: &TxOut| -> u128 {
-            if v.script_pubkey.as_bytes().to_vec() == TAPROOT_SCRIPT_PUBKEY {
-                r + <u64 as Into<u128>>::into(v.value.to_sat())
-            } else {
-                r
-            }
-        });
-
-        total
-    }
-
-    pub fn check_whitelist(&self, vout: u32) -> Result<bool> {
-        let whitelist: Vec<String> = serde_json::from_str(WHITELIST_JSON).unwrap();
-        let tx = consensus_decode::<Transaction>(&mut std::io::Cursor::new(self.transaction()))?;
-        if let Some(Artifact::Runestone(ref runestone)) = Runestone::decipher(&tx) {
-            let protostones = Protostone::from_runestone(runestone)?;
-            let message = &protostones[(vout as usize) - tx.output.len() - 1];
-            if message.edicts.len() != 0 {
-                panic!("message cannot contain edicts, only a pointer")
-            }
-            let pointer = message
-                .pointer
-                .ok_or("")
-                .map_err(|_| anyhow!("no pointer in message"))?;
-            if pointer as usize >= tx.output.len() {
-                panic!("pointer cannot be a protomessage");
-            }
-            
-            let p2sh = tx.output[(pointer as usize) as usize]
-            .script_pubkey
-            .clone()
-            .into_bytes()
-            .to_vec();
-        
-            if !whitelist.contains(&hex::encode(p2sh)) {
-                Err(anyhow!("spendable output not in whitelist"))
-            } else {
-                Ok(true)
-            }
-            
-        } else {
-            Err(anyhow!("runestone decipher failed"))
-        }
-    }
-
+    /// Public mint function for orbitals using BTC
     fn mint_orbital_btc(&self) -> Result<CallResponse> {
         let context = self.context()?;
-        let current_height = self.height();
-        if MINT_START_BLOCK > 0 {
-            if current_height < MINT_START_BLOCK {
-                return Err(anyhow!("Minting has not started yet. Current block: {}, Start block: {}", current_height, MINT_START_BLOCK));
-            }
-        }
 
         let tx = consensus_decode::<Transaction>(&mut std::io::Cursor::new(self.transaction()))
             .map_err(|e| anyhow!("Failed to parse Bitcoin transaction: {}", e))?;
@@ -402,18 +305,64 @@ impl Collection {
             return Err(anyhow!("Insufficient BTC payment"));
         }
 
-        let whitelist_result = self.check_whitelist(context.vout)?;
-        if !whitelist_result {
-            return Err(anyhow!("spendable output not in whitelist"));
-        }
+        // Run common pre-mint checks
+        self.check_mint_prerequisites(purchase_count)?;
 
         let mut response = CallResponse::forward(&context.incoming_alkanes);
-        
+
         for _ in 0..purchase_count {
             response.alkanes.0.push(self.create_mint_transfer()?);
         }
 
         Ok(response)
+    }
+
+    /// Common pre-mint checks
+    ///
+    /// Checks:
+    /// 1. Total supply limit
+    /// 2. Mint start block
+    /// 3. Whitelist status
+    fn check_mint_prerequisites(&self, count: u128) -> Result<()> {
+        // Check total supply limit
+        let index = self.instances_count();
+        if index >= (self.max_mints() + PREMINE_MINTS) {
+            return Err(anyhow!("Minted out"));
+        }
+
+        // Check mint start block
+        let current_height = self.height();
+        if MINT_START_BLOCK > 0 {
+            if current_height < MINT_START_BLOCK {
+                return Err(anyhow!("Minting has not started yet. Current block: {}, Start block: {}", current_height, MINT_START_BLOCK));
+            }
+        }
+
+        // Check whitelist
+        self.verify_minted_pubkey(count)?;
+
+        Ok(())
+    }
+
+    /// Calculate the number of orbitals that can be purchased with the given payment amount
+    pub fn calculate_purchase_count(&self, payment_amount: u128) -> (u128, u128) {
+        let count = payment_amount / ALKANES_MINT_PRICE;
+        let limited_count = std::cmp::min(count, MAX_PURCHASE_PER_TX);
+        let change = payment_amount - (limited_count * ALKANES_MINT_PRICE);
+        (limited_count, change)
+    }
+
+    /// Compute the total output value sent to the taproot address
+    fn compute_btc_output(&self, tx: &Transaction) -> u128 {
+        let total = tx.output.iter().fold(0, |r: u128, v: &TxOut| -> u128 {
+            if v.script_pubkey.as_bytes().to_vec() == TAPROOT_SCRIPT_PUBKEY {
+                r + <u64 as Into<u128>>::into(v.value.to_sat())
+            } else {
+                r
+            }
+        });
+
+        total
     }
 
     /// Create a mint transfer
@@ -472,17 +421,6 @@ impl Collection {
         self.taproot_address_pointer().get().as_ref().clone()
     }
 
-
-    // pub fn get_mint_pubkey(&self) -> Result<CallResponse> {
-    //     let context = self.context()?;
-    //     let mut response = CallResponse::forward(&context.incoming_alkanes);
-    //     response.data = self.mint_pubkey_script();
-    //     Ok(response)
-    // }
-
-    // pub fn mint_pubkey_script(&self) -> Vec<u8> {
-    //     self.mint_pubkey_pointer().get().as_ref().clone()
-    // }
     /// Verify that the caller is the contract owner using collection token
     ///
     /// # Returns
@@ -504,59 +442,6 @@ impl Collection {
         }
 
         Ok(())
-    }
-
-    /// Set the taproot address from three u128 parts
-    pub fn set_taproot_address(&self, part1: u128, part2: u128, part3: u128) -> Result<CallResponse> {
-        self.only_owner()?;
-        // Combine the three parts to form a 32-byte address
-        let mut address_bytes = Vec::with_capacity(32);
-
-        // Extract the first 10 bytes from part1
-        let part1_bytes = part1.to_le_bytes();
-        address_bytes.extend_from_slice(&part1_bytes[0..10]);
-
-        // Extract the next 10 bytes from part2
-        let part2_bytes = part2.to_le_bytes();
-        address_bytes.extend_from_slice(&part2_bytes[0..10]);
-
-        // Extract the last 12 bytes from part3
-        let part3_bytes = part3.to_le_bytes();
-        address_bytes.extend_from_slice(&part3_bytes[0..12]);
-
-        // Create a simple script that just pushes the address bytes
-        // This is a simplified approach - in a real implementation,
-        // we would use proper taproot script creation
-        let mut script_bytes = Vec::new();
-        script_bytes.push(0x51); // OP_PUSHBYTES_32
-        script_bytes.push(0x20); // 32 bytes
-        script_bytes.extend_from_slice(&address_bytes);
-
-        // 先创建脚本并转换地址
-        let script = Script::from_bytes(&script_bytes);
-        let address = to_address_str(script).unwrap_or_else(|_| String::from("Invalid taproot address"));
-
-        // 然后存储脚本
-        self.taproot_address_pointer().set(Arc::new(script_bytes));
-
-        // 返回调试信息
-        Err(anyhow!("Debug address: {}", address))
-    }
-
-    /// Get the taproot address as a string
-    fn get_taproot_address(&self) -> Result<CallResponse> {
-        let script_bytes = self.taproot_address_script();
-        if script_bytes.is_empty() {
-            return Err(anyhow!("Taproot address not set"));
-        }
-
-        let script = Script::from_bytes(&script_bytes);
-        let address = to_address_str(script).unwrap_or_else(|_| String::from("Invalid taproot address"));
-
-        let context = self.context()?;
-        let mut response = CallResponse::forward(&context.incoming_alkanes);
-        response.data = address.into_bytes();
-        Ok(response)
     }
 
     /// Get storage pointer for authorized mint count
@@ -764,44 +649,30 @@ impl Collection {
     }
 
     //用这个替换check_whitelist 就是用merkle proof 验证
-    pub fn verify_minted_pubkey(&self, vout: u32) -> Result<bool> {
-
+    pub fn verify_minted_pubkey(&self, count: u128) -> Result<bool> {
         let mut minted_set: HashSet<Vec<u8>> = self.get_minted_pubkey_set()?;
-
         let tx = consensus_decode::<Transaction>(&mut std::io::Cursor::new(self.transaction()))?;
-        if let Some(Artifact::Runestone(ref runestone)) = Runestone::decipher(&tx) {
-            let protostones = Protostone::from_runestone(runestone)?;
-            let message = &protostones[(vout as usize) - tx.output.len() - 1];
-            if message.edicts.len() != 0 {
-                panic!("message cannot contain edicts, only a pointer")
-            }
-            let pointer = message
-                .pointer
-                .ok_or("")
-                .map_err(|_| anyhow!("no pointer in message"))?;
-            if pointer as usize >= tx.output.len() {
-                panic!("pointer cannot be a protomessage");
-            }
-            
-            let output_script = tx.output[(pointer as usize) as usize]
+
+        let output_script = tx.output[0]
             .script_pubkey
             .clone()
             .into_bytes()
             .to_vec();
-            if !minted_set.contains(&output_script) {
 
-                let mut cursor: Cursor<Vec<u8>> =
+        if !minted_set.contains(&output_script) {
+            let mut cursor: Cursor<Vec<u8>> =
                 Cursor::<Vec<u8>>::new(find_witness_payload(&tx, 0).ok_or("").map_err(|_| {
                     anyhow!("merkle-distributor: witness envelope at index 0 does not contain data")
                 })?);
-                let leaf = consume_exact(&mut cursor, output_script.len()+4)?;
-                let leaf_hash = Sha256::hash(&leaf);
-                let proof = consume_to_end(&mut cursor)?;
-                let mut leaf_cursor = Cursor::new(leaf.clone());
-                let script = consume_exact(&mut leaf_cursor, output_script.len())?;
-                let index = consume_sized_int::<u32>(&mut leaf_cursor)? as usize;
 
-                if script == output_script {
+            let leaf = consume_exact(&mut cursor, output_script.len() + 4)?;
+            let leaf_hash = Sha256::hash(&leaf);
+            let proof = consume_to_end(&mut cursor)?;
+            let mut leaf_cursor = Cursor::new(leaf.clone());
+            let script = consume_exact(&mut leaf_cursor, output_script.len())?;
+            let index = consume_sized_int::<u32>(&mut leaf_cursor)? as usize;
+
+            if script == output_script {
                 if MerkleProof::<Sha256>::try_from(proof)?.verify(
                     MERKLE_ROOT,
                     &[index],
@@ -810,21 +681,17 @@ impl Collection {
                 ) {
                     minted_set.insert(output_script);
                     self.save_minted_pubkey_set(&minted_set)?;
-                    Ok(true) 
+                    Ok(true)
                 } else {
                     Err(anyhow!("proof verification failure"))
                 }
-                } else {
-                    Err(anyhow!("output_script does not match proof"))
-                }
             } else {
-                Err(anyhow!("output_script already minted"))
+                Err(anyhow!("output_script does not match proof"))
             }
         } else {
-            Err(anyhow!("runestone decipher failed"))
+            Err(anyhow!("output_script already minted"))
         }
     }
-
 }
 
 declare_alkane! {
