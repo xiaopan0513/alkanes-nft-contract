@@ -1,5 +1,3 @@
-use bitcoin::script;
-use bitcoin::taproot::LeafVersion;
 use rs_merkle::{algorithms::Sha256, Hasher, MerkleProof, MerkleTree};
 use wasm_bindgen_test::*;
 use bitcoin::Address;

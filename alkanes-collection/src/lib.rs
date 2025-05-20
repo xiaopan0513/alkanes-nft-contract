@@ -24,14 +24,13 @@ use anyhow::{anyhow, Result};
 use bitcoin::{Transaction, TxOut};
 use metashrew_support::utils::consensus_decode;
 use rs_merkle::{algorithms::Sha256, Hasher, MerkleProof};
-use std::collections::HashSet;
 use std::io::Cursor;
 use std::sync::Arc;
 
 mod generation;
 
 /// Template ID for orbital NFT
-const ORBITAL_TEMPLATE_ID: u128 = 999013;
+const ORBITAL_TEMPLATE_ID: u128 = 999202;
 
 /// Name of the NFT collection
 const CONTRACT_NAME: &str = "Orbinauts";
@@ -72,8 +71,10 @@ const PAYMENT_TOKEN_ID: AlkaneId = AlkaneId {
 };
 
 const MERKLE_ROOT: [u8; 32] = [
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    0x48, 0x9a, 0xc6, 0x97, 0x24, 0x4c, 0x25, 0xa6,
+    0x5c, 0xde, 0x89, 0x9c, 0x20, 0xf0, 0xa3, 0x7f,
+    0xfe, 0x80, 0x03, 0x0e, 0x91, 0xce, 0x42, 0x31,
+    0x4d, 0x2a, 0xb9, 0xbd, 0x77, 0x30, 0xe5, 0x26
 ];
 
 const MERKLE_LEAF_COUNT: u128 = 0;
@@ -627,45 +628,26 @@ impl Collection {
         Ok(response)
     }
 
-    fn minted_pubkey_pointer(&self) -> StoragePointer {
-        StoragePointer::from_keyword("/minted-pubkey")
-    }
-
-    fn get_minted_pubkey_set(&self) -> Result<HashSet<Vec<u8>>> {
-        let data = self.minted_pubkey_pointer().get();
-        if data.as_ref().is_empty() {
-            Ok(HashSet::new())
-        } else {
-            serde_json::from_slice(data.as_ref())
-                .map_err(|e| anyhow!("Failed to deserialize whitelist: {}", e))
-        }
-    }
-
-    fn save_minted_pubkey_set(&self, minted_set: &HashSet<Vec<u8>>) -> Result<()> {
-        let json = serde_json::to_vec(minted_set)
-            .map_err(|e| anyhow!("Failed to serialize whitelist: {}", e))?;
-        self.minted_pubkey_pointer().set(Arc::new(json));
-        Ok(())
-    }
-
-    fn script_minted_count_pointer(&self,index:u32) -> StoragePointer {
+    fn script_minted_count_pointer(&self, index: u32) -> StoragePointer {
         StoragePointer::from_keyword(format!("/minted-pubkey-{}", index).as_str())
     }
 
-    fn add_script_minted_count(&self,index:u32, add_count:u128,limit: u128) -> Result<()> {
+    fn add_script_minted_count(&self, index: u32, add_count: u128, limit: u128) -> Result<()> {
         let mut pointer = self.script_minted_count_pointer(index);
         let current_count = pointer.get_value::<u128>();
-        let new_count = current_count.checked_add(add_count).ok_or_else(|| anyhow!("minted count overflow"))?;
+        let new_count = current_count.checked_add(add_count)
+            .ok_or_else(|| anyhow!("minted count overflow"))?;
+        
         if new_count > limit {
             return Err(anyhow!("minted count exceeds limit"));
         }
+        
         pointer.set_value::<u128>(new_count);
         Ok(())
     }
 
     //用这个替换check_whitelist 就是用merkle proof 验证
     pub fn verify_minted_pubkey(&self, count: u128) -> Result<bool> {
-        let context = self.context()?;
         let tx = consensus_decode::<Transaction>(&mut std::io::Cursor::new(self.transaction()))?;
 
         let output_script = tx.output[0]
@@ -687,7 +669,6 @@ impl Collection {
         let index = consume_sized_int::<u32>(&mut leaf_cursor)?;
         let limit = consume_sized_int::<u32>(&mut leaf_cursor)?;
 
-    
         if script == output_script {
             if MerkleProof::<Sha256>::try_from(proof)?.verify(
                 MERKLE_ROOT,
@@ -695,21 +676,14 @@ impl Collection {
                 &[leaf_hash],
                 MERKLE_LEAF_COUNT as usize,
             ) {
-                let new_balance = self.balance(&context.caller, &context.myself).checked_add(count).ok_or_else(|| anyhow!("balance overflow"))?;
-                if new_balance > limit as u128 {
-                    return Err(anyhow!("minted count exceeds limit"));
-                } else {
-                    Ok(true)
-                }
-                //不确定上面余额校验的逻辑是否正确。 如果有问题的话，需要用下面的逻辑
-                // self.add_script_minted_count(index, count, limit as u128)?;
+                self.add_script_minted_count(index, count, limit as u128)?;
+                Ok(true)
             } else {
-                Err(anyhow!("proof verification failure"))
+                Ok(false)
             }
         } else {
-            Err(anyhow!("output_script does not match proof"))
+            Ok(false)
         }
-
     }
 }
 
