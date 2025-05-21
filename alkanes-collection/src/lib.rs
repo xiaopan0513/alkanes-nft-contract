@@ -628,11 +628,17 @@ impl Collection {
         Ok(response)
     }
 
-    fn script_minted_count_pointer(&self, index: u32) -> StoragePointer {
+    pub fn script_minted_count_pointer(&self, index: u32) -> StoragePointer {
         StoragePointer::from_keyword(format!("/minted-pubkey-{}", index).as_str())
     }
 
-    fn add_script_minted_count(&self, index: u32, add_count: u128, limit: u128) -> Result<()> {
+    pub fn get_script_minted_count(&self, index: u32) -> Result<u128> {
+        let pointer = self.script_minted_count_pointer(index);
+        let count = pointer.get_value::<u128>();
+        Ok(count)
+    }
+
+    pub fn add_script_minted_count(&self, index: u32, add_count: u128, limit: u128) -> Result<()> {
         let mut pointer = self.script_minted_count_pointer(index);
         let current_count = pointer.get_value::<u128>();
         let new_count = current_count.checked_add(add_count)
@@ -641,7 +647,6 @@ impl Collection {
         if new_count > limit {
             return Err(anyhow!("minted count exceeds limit"));
         }
-        
         pointer.set_value::<u128>(new_count);
         Ok(())
     }

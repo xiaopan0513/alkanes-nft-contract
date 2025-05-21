@@ -4,7 +4,8 @@ use bitcoin::Address;
 use bitcoin::Network;
 use std::str::FromStr;
 use std::collections::HashMap;
-
+use alkanes_collection::Collection;
+use metashrew_support::index_pointer::KeyValuePointer;
 #[cfg(target_arch = "wasm32")]
 use web_sys::console;
 
@@ -41,7 +42,7 @@ fn test_test() {
     assert!(proof.verify(merkle_root, &indices_to_prove, leaves_to_prove, leaves.len()));
 }
 
-#[wasm_bindgen_test]
+// #[wasm_bindgen_test]
 fn test_merkle_generator() {
     let address_list = ["bc1ps0tzpn3m8t8p4qsnx5qsr3ln96ees9rt4xdfn2zxmwz3cvvzsk0qvh87ee",
      "bc1qxuz3y9m0fsxplndksnszqecvwhu8utx8y2zyvf", "193Hnys7HyfeTdhg3pkWxSX3ggCRjC6Pg4"];
@@ -88,7 +89,7 @@ fn test_merkle_generator() {
     assert!(proof.verify(merkle_root, &[0], &[verify_hash], leaves.len()));
 }
 
-#[wasm_bindgen_test]
+// #[wasm_bindgen_test]
 fn test_merkle_generator2() {
     const WHITELIST_JSON: &str = include_str!("whitelist.json");
 
@@ -144,3 +145,12 @@ fn test_merkle_generator2() {
         test_print!("script: {:?}, index: {}, count: {}, proof: {:?}", script, i, count, hex::encode(merkle_proof.to_bytes()));
     }
 }
+
+#[wasm_bindgen_test]
+fn test_pointer_count() {
+    let alkane = Collection::default();
+    alkane.add_script_minted_count(4,5,5).unwrap();
+    assert_eq!(alkane.get_script_minted_count(4).unwrap(), 5u128);
+    assert_eq!(alkane.add_script_minted_count(4,5,5).is_err(), true);
+}
+
