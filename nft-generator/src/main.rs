@@ -18,7 +18,7 @@ fn main() -> Result<()> {
         std::fs::write(&filename, svg)?;
         
         if i % 100 == 0 {
-            println!("Generated {}/10000 images", i);
+            println!("Generated {}/3600 images", i);
         }
     }
     

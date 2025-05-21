@@ -27,12 +27,12 @@ impl SvgGenerator {
 
     /// Decode traits for a specific NFT index
     /// 返回 (background, misc, visors, suits)
-    pub fn decode_traits(index: usize) -> Result<(String, String, String, String)> {
+    pub fn decode_traits(index: u128) -> Result<(String, String, String, String)> {
         let encoded_traits = Self::get_encoded_traits();
         let format = &encoded_traits["format"];
         let indices = &encoded_traits["indices"];
         let items = encoded_traits["items"].as_array().ok_or_else(|| anyhow!("Invalid items array"))?;
-        let encoded = items.get(index)
+        let encoded = items.get(index as usize)
             .ok_or_else(|| anyhow!("Invalid trait index"))?
             .as_u64()
             .ok_or_else(|| anyhow!("Invalid trait format"))?;
@@ -65,11 +65,11 @@ impl SvgGenerator {
     /// 
     /// # Returns
     /// * `Result<String>` - SVG image data as string
-    pub fn generate_svg(index: usize) -> Result<String> {
+    pub fn generate_svg(index: u128) -> Result<String> {
         let (background, misc, visors, suits) = Self::decode_traits(index)?;
         let svg_templates = Self::get_svg_templates();
 
-        let mut svg = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" shape-rendering=\"crispEdges\" viewBox=\"0 0 32 32\">\n");
+        let mut svg = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" shape-rendering=\"crispEdges\" viewBox=\"0 0 200 200\">\n");
 
         // Add background
         if background != "none" {
@@ -111,7 +111,7 @@ impl SvgGenerator {
     /// 
     /// # Returns
     /// * `Result<String>` - JSON string containing NFT attributes
-    pub fn get_attributes(index: usize) -> Result<String> {
+    pub fn get_attributes(index: u128) -> Result<String> {
         let (background, misc, visors, suits) = Self::decode_traits(index)?;
         let attributes = serde_json::json!([
             {
