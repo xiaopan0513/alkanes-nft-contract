@@ -93,7 +93,7 @@ fn test_merkle_generator() {
     assert!(proof.verify(merkle_root, &[0], &[verify_hash], leaves.len()));
 }
 
-#[test]
+#[wasm_bindgen_test]
 fn test_merkle_generator2() {
     println!("Starting test_merkle_generator2");
     const WHITELIST_JSON: &str = include_str!("whitelist.json");

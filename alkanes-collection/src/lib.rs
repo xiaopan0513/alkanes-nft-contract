@@ -30,7 +30,7 @@ use std::sync::Arc;
 mod generation;
 
 /// Template ID for orbital NFT
-const ORBITAL_TEMPLATE_ID: u128 = 999401;
+const ORBITAL_TEMPLATE_ID: u128 = 999906;
 
 /// Name of the NFT collection
 const CONTRACT_NAME: &str = "Orbinauts";
@@ -41,39 +41,61 @@ const CONTRACT_SYMBOL: &str = "Orbinaut";
 /// Maximum number of NFTs that can be minted
 const MAX_MINTS: u128 = 3600;
 
-/// Maximum number of NFTs that can be purchased in a single transaction
-const MAX_PURCHASE_PER_TX: u128 = 5;
+/// Maximum number of NFTs that can be purchased in a single transaction during whitelist phase
+const WHITELIST_MAX_PURCHASE_PER_TX: u128 = 2;
+
+/// Maximum number of NFTs that can be purchased in a single transaction during public phase
+const PUBLIC_MAX_PURCHASE_PER_TX: u128 = 1;
+
+/// Block height at which whitelist minting begins
+const WHITELIST_MINT_START_BLOCK: u64 = 253065;
 
 /// Block height at which public minting begins
-/// If set to 0, minting will be available immediately without block height restriction
-const MINT_START_BLOCK: u64 = 0;
-
-/// Price per NFT in payment tokens
-const ALKANES_MINT_PRICE: u128 = 100;
-
-const BTC_MINT_PRICE: u128 = 10000;
+const PUBLIC_MINT_START_BLOCK: u64 = 253070;
 
 const TAPROOT_SCRIPT_PUBKEY: [u8; 34] = [
-    0x51, 0x20, 0x42, 0xe5, 0xcb, 0x94, 0x70, 0x25, 0x68, 0x2d,
-    0xe7, 0xfe, 0x26, 0xf3, 0x9d, 0x52, 0x78, 0x08, 0x83, 0xae,
-    0xeb, 0xc8, 0x25, 0x17, 0x37, 0xbd, 0xd4, 0xb3, 0x3b, 0x86,
-    0xee, 0x03, 0x72, 0x47
+    0x51, 0x20, 0x44, 0xa9, 0x58, 0xe6, 0xf9, 0xb5, 0x93, 0xb7,
+    0x39, 0x21, 0x75, 0xaf, 0xc5, 0x3a, 0xd9, 0xdb, 0xb2, 0xfc,
+    0x05, 0xf9, 0xf4, 0x59, 0xf9, 0x10, 0xae, 0xf8, 0x2e, 0x5c,
+    0x35, 0xad, 0x00, 0x49
 ];
-
-/// Payment token ID
-const PAYMENT_TOKEN_ID: AlkaneId = AlkaneId {
-    block: 2,
-    tx: 1,
-};
 
 const MERKLE_ROOT: [u8; 32] = [
-    0x1c, 0xb2, 0x84, 0xfd, 0x72, 0x3b, 0xf8, 0x8c,
-    0x0b, 0x95, 0x94, 0x74, 0xf3, 0x6e, 0xf9, 0x66,
-    0x5a, 0x44, 0x79, 0x63, 0x16, 0x27, 0xdb, 0x85,
-    0xd0, 0xcc, 0x58, 0xd2, 0x81, 0x06, 0x76, 0xf5
+    0x2f, 0x03, 0xd4, 0x54, 0x18, 0xfa, 0xa3, 0x90,
+    0xdd, 0x55, 0xa4, 0x51, 0x6b, 0xcd, 0xf3, 0x70,
+    0x6d, 0x7b, 0xc7, 0xef, 0xe5, 0x2d, 0xad, 0x22,
+    0xe9, 0xb9, 0xcd, 0x37, 0xcc, 0x00, 0xa4, 0x11
 ];
 
-const MERKLE_LEAF_COUNT: u128 = 1000;
+const MERKLE_LEAF_COUNT: u128 = 1003;
+
+/// Price per NFT in payment tokens
+const BTC_MINT_PRICE: u128 = 10000;
+
+/// Payment option structure
+#[derive(Clone)]
+struct PaymentOption {
+    token_id: AlkaneId,
+    price: u128,
+}
+
+/// Payment options for minting
+const PAYMENT_OPTIONS: [PaymentOption; 2] = [
+    PaymentOption {
+        token_id: AlkaneId {
+            block: 2,
+            tx: 1,
+        },
+        price: 100,
+    },
+    PaymentOption {
+        token_id: AlkaneId {
+            block: 2,
+            tx: 2,
+        },
+        price: 100,
+    },
+];
 
 /// Collection Contract Structure
 /// This is the main contract structure that implements the NFT collection functionality
@@ -225,12 +247,28 @@ impl Collection {
         Ok(response)
     }
 
+    /// Get storage pointer for public mint addresses
+    fn public_mint_addresses_pointer(&self) -> StoragePointer {
+        StoragePointer::from_keyword("/public-mint-addresses")
+    }
+
+    /// Check if an address has already minted in public phase
+    fn has_public_minted(&self, output_script: &Vec<u8>) -> bool {
+        self.public_mint_addresses_pointer().select(output_script).get_value::<u8>() == 1
+    }
+
+    /// Mark an address as having minted in public phase
+    fn mark_public_minted(&self, output_script: &Vec<u8>) {
+        self.public_mint_addresses_pointer().select(output_script).set_value::<u8>(1);
+    }
+
     /// Common pre-mint checks
     ///
     /// Checks:
     /// 1. Total supply limit
     /// 2. Mint start block
     /// 3. Whitelist status
+    /// 4. Public mint address restriction
     fn check_mint_prerequisites(&self, count: u128, tx: Option<&Transaction>) -> Result<()> {
         // Check total supply limit
         let index = self.instances_count();
@@ -240,14 +278,27 @@ impl Collection {
 
         // Check mint start block
         let current_height = self.height();
-        if MINT_START_BLOCK > 0 {
-            if current_height < MINT_START_BLOCK {
-                return Err(anyhow!("Minting has not started yet. Current block: {}, Start block: {}", current_height, MINT_START_BLOCK));
+        
+        // Check if we're in whitelist phase
+        if current_height >= WHITELIST_MINT_START_BLOCK && current_height < PUBLIC_MINT_START_BLOCK {
+            // In whitelist phase, must verify whitelist
+            self.verify_minted_pubkey(count, tx)?;
+        } else if current_height < WHITELIST_MINT_START_BLOCK {
+            return Err(anyhow!("Minting has not started yet. Current block: {}, Whitelist start: {}, Public start: {}", 
+                current_height, WHITELIST_MINT_START_BLOCK, PUBLIC_MINT_START_BLOCK));
+        } else {
+            // In public phase, check if address has already minted
+            let tx = match tx {
+                Some(tx) => tx.clone(),
+                None => consensus_decode::<Transaction>(&mut std::io::Cursor::new(self.transaction()))?,
+            };
+            let output_script = tx.output[0].script_pubkey.clone().into_bytes().to_vec();
+            if self.has_public_minted(&output_script) {
+                return Err(anyhow!("Address has already minted in public phase"));
             }
+            // Mark address as minted in public phase
+            self.mark_public_minted(&output_script);
         }
-
-        // Check whitelist
-        self.verify_minted_pubkey(count, tx)?;
 
         Ok(())
     }
@@ -261,11 +312,13 @@ impl Collection {
         }
 
         let transfer = context.incoming_alkanes.0[0];
-        if transfer.id != PAYMENT_TOKEN_ID {
-            return Err(anyhow!("Incorrect payment alkanes"));
-        }
+        
+        // Find matching payment option
+        let payment_option = PAYMENT_OPTIONS.iter()
+            .find(|option| option.token_id == transfer.id)
+            .ok_or_else(|| anyhow!("Incorrect payment alkanes"))?;
 
-        let (purchase_count, change) = self.calculate_purchase_count(transfer.value);
+        let (purchase_count, change) = self.calculate_purchase_count(transfer.value, payment_option.price);
         if purchase_count == 0 {
             return Err(anyhow!("Insufficient payment"));
         }
@@ -277,7 +330,7 @@ impl Collection {
 
         if change > 0 {
             response.alkanes.0.push(AlkaneTransfer {
-                id: PAYMENT_TOKEN_ID,
+                id: payment_option.token_id,
                 value: change,
             });
         }
@@ -302,7 +355,14 @@ impl Collection {
             return Err(anyhow!("BTC payment amount {} below minimum {}", btc_amount, BTC_MINT_PRICE));
         }
 
-        let purchase_count = std::cmp::min(btc_amount / BTC_MINT_PRICE, MAX_PURCHASE_PER_TX);
+        let current_height = self.height();
+        let max_purchase = if current_height >= WHITELIST_MINT_START_BLOCK && current_height < PUBLIC_MINT_START_BLOCK {
+            WHITELIST_MAX_PURCHASE_PER_TX
+        } else {
+            PUBLIC_MAX_PURCHASE_PER_TX
+        };
+
+        let purchase_count = std::cmp::min(btc_amount / BTC_MINT_PRICE, max_purchase);
         if purchase_count == 0 {
             return Err(anyhow!("Insufficient BTC payment"));
         }
@@ -320,10 +380,17 @@ impl Collection {
     }
 
     /// Calculate the number of orbitals that can be purchased with the given payment amount
-    pub fn calculate_purchase_count(&self, payment_amount: u128) -> (u128, u128) {
-        let count = payment_amount / ALKANES_MINT_PRICE;
-        let limited_count = std::cmp::min(count, MAX_PURCHASE_PER_TX);
-        let change = payment_amount - (limited_count * ALKANES_MINT_PRICE);
+    pub fn calculate_purchase_count(&self, payment_amount: u128, price: u128) -> (u128, u128) {
+        let current_height = self.height();
+        let max_purchase = if current_height >= WHITELIST_MINT_START_BLOCK && current_height < PUBLIC_MINT_START_BLOCK {
+            WHITELIST_MAX_PURCHASE_PER_TX
+        } else {
+            PUBLIC_MAX_PURCHASE_PER_TX
+        };
+
+        let count = payment_amount / price;
+        let limited_count = std::cmp::min(count, max_purchase);
+        let change = payment_amount - (limited_count * price);
         (limited_count, change)
     }
 
@@ -383,16 +450,6 @@ impl Collection {
     /// * `u128` - Maximum number of tokens that can be minted
     fn max_mints(&self) -> u128 {
         MAX_MINTS
-    }
-
-    /// Get the pointer to the taproot address
-    pub fn taproot_address_pointer(&self) -> StoragePointer {
-        StoragePointer::from_keyword("/taproot-address")
-    }
-
-    /// Get the taproot address script
-    pub fn taproot_address_script(&self) -> Vec<u8> {
-        self.taproot_address_pointer().get().as_ref().clone()
     }
 
     /// Verify that the caller is the contract owner using collection token
@@ -575,6 +632,7 @@ impl Collection {
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
         let attributes = SvgGenerator::get_attributes(index)?;
+        println!("{}", attributes);  // 输出 JSON 字符串
         response.data = attributes.into_bytes();
         Ok(response)
     }
@@ -593,9 +651,15 @@ impl Collection {
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
-        let total_balance = self.balance(&context.myself, &PAYMENT_TOKEN_ID);
-        if total_balance > 0 {
-            response.alkanes.0.push(AlkaneTransfer { id: PAYMENT_TOKEN_ID, value: total_balance });
+        // Withdraw all payment tokens
+        for option in PAYMENT_OPTIONS.iter() {
+            let total_balance = self.balance(&context.myself, &option.token_id);
+            if total_balance > 0 {
+                response.alkanes.0.push(AlkaneTransfer { 
+                    id: option.token_id, 
+                    value: total_balance 
+                });
+            }
         }
 
         Ok(response)
@@ -649,7 +713,7 @@ impl Collection {
         let index = consume_sized_int::<u32>(&mut leaf_cursor)?;
         let limit = consume_sized_int::<u32>(&mut leaf_cursor)?;
 
-        if script != output_script {
+        if script != *output_script {
             return Err(anyhow!("script mismatch"));
         }
 

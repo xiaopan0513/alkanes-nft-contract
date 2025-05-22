@@ -16,7 +16,10 @@ fn main() -> Result<()> {
         let svg = SvgGenerator::generate_svg(i)?;
         let filename = format!("output/{:04}.svg", i);
         std::fs::write(&filename, svg)?;
-        
+
+        let attributes = SvgGenerator::get_attributes(i)?;
+        println!("{}", attributes);
+
         if i % 100 == 0 {
             println!("Generated {}/3600 images", i);
         }

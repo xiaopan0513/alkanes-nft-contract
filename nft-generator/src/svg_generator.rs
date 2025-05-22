@@ -69,7 +69,7 @@ impl SvgGenerator {
         let (background, misc, visors, suits) = Self::decode_traits(index)?;
         let svg_templates = Self::get_svg_templates();
 
-        let mut svg = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" shape-rendering=\"crispEdges\" viewBox=\"0 0 200 200\">\n");
+        let mut svg = String::from("<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" viewBox=\"0 0 200 200\">\n");
 
         // Add background
         if background != "none" {
