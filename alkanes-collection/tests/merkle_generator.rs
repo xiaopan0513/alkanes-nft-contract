@@ -1,7 +1,6 @@
 use alkanes_collection::Collection;
 use bitcoin::Address;
 use bitcoin::Network;
-use metashrew_support::index_pointer::KeyValuePointer;
 use rs_merkle::{algorithms::Sha256, Hasher, MerkleProof, MerkleTree};
 use serde_json;
 use serde_json::json;
@@ -14,10 +13,10 @@ use web_sys::console;
 macro_rules! test_print {
     ($($arg:tt)*) => {
         #[cfg(target_arch = "wasm32")]
-        console::log_1(&format!($($arg)*).into());
+        { console::log_1(&format!($($arg)*).into()) }
         
         #[cfg(not(target_arch = "wasm32"))]
-        println!($($arg)*);
+        { println!($($arg)*) }
     };
 }
 
@@ -173,4 +172,3 @@ fn test_pointer_count() {
     assert_eq!(alkane.get_script_minted_count(4).unwrap(), 5u128);
     assert_eq!(alkane.add_script_minted_count(4, 5, 5).is_err(), true);
 }
-

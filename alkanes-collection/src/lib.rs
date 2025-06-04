@@ -26,77 +26,53 @@ use metashrew_support::utils::consensus_decode;
 use rs_merkle::{algorithms::Sha256, Hasher, MerkleProof};
 use std::io::Cursor;
 use std::sync::Arc;
-use serde_json::json;
 
-mod generation;
+pub mod generation;
 
 /// Template ID for orbital NFT
-const ORBITAL_TEMPLATE_ID: u128 = 999901;
+const ORBITAL_TEMPLATE_ID: u128 = 111111;
+
+const ALKANE_BG_ID: AlkaneId = AlkaneId { block: 2, tx: 26177 };
 
 /// Name of the NFT collection
-const CONTRACT_NAME: &str = "Orbinauts";
+const CONTRACT_NAME: &str = "Dead Alkanes Club";
 
 /// Symbol of the NFT collection
-const CONTRACT_SYMBOL: &str = "Orbinaut";
+const CONTRACT_SYMBOL: &str = "Dead Alkanes Club";
 
 /// Maximum number of NFTs that can be minted
-const MAX_MINTS: u128 = 3600;
+const MAX_MINTS: u128 = 1300;
 
 /// Maximum number of NFTs that can be purchased in a single transaction during whitelist phase
-const WHITELIST_MAX_PURCHASE_PER_TX: u128 = 2;
+const WHITELIST_MAX_PURCHASE_PER_TX: u128 = 1;
 
 /// Maximum number of NFTs that can be purchased in a single transaction during public phase
 const PUBLIC_MAX_PURCHASE_PER_TX: u128 = 1;
 
 /// Block height at which whitelist minting begins
-const WHITELIST_MINT_START_BLOCK: u64 = 899069;
+const WHITELIST_MINT_START_BLOCK: u64 = 901520;
 
 /// Block height at which public minting begins
-const PUBLIC_MINT_START_BLOCK: u64 = 899089;
+const PUBLIC_MINT_START_BLOCK: u64 = 901534;
 
 const TAPROOT_SCRIPT_PUBKEY: [u8; 34] = [
-    0x51, 0x20, 0x4b, 0x3c, 0x9d, 0x68, 0xdb, 0x3a, 0x99, 0x7e,
-    0xed, 0x99, 0x1c, 0xcc, 0xc9, 0xf7, 0xe7, 0x45, 0x51, 0x8b,
-    0x46, 0x3e, 0xb8, 0xa6, 0x46, 0x09, 0x8f, 0x8e, 0xe5, 0x74,
-    0xb9, 0xa2, 0x0f, 0x9c
+    0x51, 0x20, 0x9c, 0x2f, 0xf8, 0x00, 0x83, 0xd8, 0x6e, 0xa2,
+    0x94, 0x00, 0x8c, 0x03, 0x67, 0xb3, 0x1b, 0xe3, 0xb8, 0x5c,
+    0x39, 0x19, 0x77, 0x12, 0x8c, 0x66, 0xbb, 0x84, 0x10, 0x14,
+    0xeb, 0x09, 0x7e, 0x81
 ];
 
 const MERKLE_ROOT: [u8; 32] = [
-    0x1e, 0x80, 0xa9, 0x9c, 0x1a, 0x72, 0x3f, 0x0e,
-    0x49, 0x87, 0xaa, 0x5b, 0x56, 0x5b, 0x83, 0x2f,
-    0xc0, 0x2a, 0xf6, 0xcc, 0x34, 0x8c, 0xae, 0xe9,
-    0x60, 0x99, 0xbc, 0x3a, 0xfe, 0xce, 0x09, 0x14
+    0xb0, 0x11, 0x58, 0xdf, 0xf6, 0xf0, 0xc3, 0xa4,
+    0xdc, 0x73, 0x8b, 0xa0, 0x35, 0x3b, 0xe6, 0x1d,
+    0xce, 0x77, 0x53, 0xed, 0x88, 0x62, 0x15, 0xbb,
+    0x9c, 0x96, 0xdf, 0xbe, 0xcd, 0x84, 0x6f, 0x12
 ];
 
-const MERKLE_LEAF_COUNT: u128 = 1738;
+const MERKLE_LEAF_COUNT: u128 = 1053;
 
 /// Price per NFT in payment tokens
-const BTC_MINT_PRICE: u128 = 31000;
-
-/// Payment option structure
-#[derive(Clone)]
-struct PaymentOption {
-    token_id: AlkaneId,
-    price: u128,
-}
-
-/// Payment options for minting
-const PAYMENT_OPTIONS: [PaymentOption; 2] = [
-    PaymentOption {
-        token_id: AlkaneId {
-            block: 2,
-            tx: 0,
-        },
-        price: 60000000,
-    },
-    PaymentOption {
-        token_id: AlkaneId {
-            block: 2,
-            tx: 16,
-        },
-        price: 100000000000,
-    },
-];
+const BTC_MINT_PRICE: u128 = 9000;
 
 /// Collection Contract Structure
 /// This is the main contract structure that implements the NFT collection functionality
@@ -200,6 +176,23 @@ impl Token for Collection {
     }
 }
 
+pub fn encode_string_to_u128(s: &str) -> (u128, u128) {
+    // 确保字符串长度为 32 字节
+    let mut bytes = s.as_bytes().to_vec();
+    if bytes.len() < 32 {
+        bytes.resize(32, 0); // 用0填充不足部分
+    } else if bytes.len() > 32 {
+        bytes.truncate(32); // 截断超出部分
+    }
+
+    // 分割为两个 16 字节块并转为 u128（大端序）
+    let (first_half, second_half) = bytes.split_at(16);
+    let u1 = u128::from_le_bytes(first_half.try_into().unwrap());
+    let u2 = u128::from_le_bytes(second_half.try_into().unwrap());
+
+    (u1, u2)
+}
+
 impl Collection {
     /// Initialize the contract
     ///
@@ -284,7 +277,7 @@ impl Collection {
 
         // Check mint start block
         let current_height = self.height();
-        
+
         // Check if we're in whitelist phase
         if current_height >= WHITELIST_MINT_START_BLOCK && current_height < PUBLIC_MINT_START_BLOCK {
             // In whitelist phase, must verify whitelist
@@ -311,41 +304,7 @@ impl Collection {
 
     /// Public mint function for orbitals using Alkanes
     fn mint_orbital(&self) -> Result<CallResponse> {
-        let context = self.context()?;
-
-        if context.incoming_alkanes.0.len() != 1 {
-            return Err(anyhow!("Payments include multiple alkanes"));
-        }
-
-        let transfer = context.incoming_alkanes.0[0];
-        
-        // Find matching payment option
-        let payment_option = PAYMENT_OPTIONS.iter()
-            .find(|option| option.token_id == transfer.id)
-            .ok_or_else(|| anyhow!("Incorrect payment alkanes"))?;
-
-        let (purchase_count, change) = self.calculate_purchase_count(transfer.value, payment_option.price);
-        if purchase_count == 0 {
-            return Err(anyhow!("Insufficient payment"));
-        }
-
-        // Run common pre-mint checks
-        self.check_mint_prerequisites(purchase_count, None)?;
-
-        let mut response = CallResponse::default();
-
-        if change > 0 {
-            response.alkanes.0.push(AlkaneTransfer {
-                id: payment_option.token_id,
-                value: change,
-            });
-        }
-
-        for _ in 0..purchase_count {
-            response.alkanes.0.push(self.create_mint_transfer()?);
-        }
-
-        Ok(response)
+        return Err(anyhow!("Alkanes payment is not supported"));
     }
 
     /// Public mint function for orbitals using BTC
@@ -623,22 +582,34 @@ impl Collection {
     }
 
     /// Get data for a specific orbital
-    fn get_data(&self, index: u128) -> Result<CallResponse> {
+    pub fn get_data(&self, index: u128) -> Result<CallResponse> {
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
+        let (background, _facility, _body, _clothes, _eyes, _head) = SvgGenerator::decode_traits(index)?;
 
-        let svg = SvgGenerator::generate_svg(index)?;
-        response.data = svg.into_bytes();
+        let (f, s) = encode_string_to_u128(&background);
+        let cellpack = Cellpack {
+            target: ALKANE_BG_ID,
+            inputs: vec![1001, f, s],
+        };
+
+        let call_response = self.staticcall(
+            &cellpack,
+            &AlkaneTransferParcel::default(),
+            self.fuel(),
+        )?;
+
+        let bg = call_response.data;
+        response.data = SvgGenerator::generate_png(index, bg)?;
         Ok(response)
     }
 
     /// Get attributes for a specific orbital
-    fn get_attributes(&self, index: u128) -> Result<CallResponse> {
+    pub fn get_attributes(&self, index: u128) -> Result<CallResponse> {
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
         let attributes = SvgGenerator::get_attributes(index)?;
-        println!("{}", attributes);  // 输出 JSON 字符串
         response.data = attributes.into_bytes();
         Ok(response)
     }
@@ -652,23 +623,7 @@ impl Collection {
     /// # Returns
     /// * `Result<CallResponse>` - Success or failure of withdrawal operation
     fn withdraw(&self) -> Result<CallResponse> {
-        self.only_owner()?;
-
-        let context = self.context()?;
-        let mut response = CallResponse::forward(&context.incoming_alkanes);
-
-        // Withdraw all payment tokens
-        for option in PAYMENT_OPTIONS.iter() {
-            let total_balance = self.balance(&context.myself, &option.token_id);
-            if total_balance > 0 {
-                response.alkanes.0.push(AlkaneTransfer { 
-                    id: option.token_id, 
-                    value: total_balance 
-                });
-            }
-        }
-
-        Ok(response)
+        Err(anyhow!("Alkanes payment is not supported"))
     }
 
     /// Get vault balances for all payment tokens
@@ -676,25 +631,7 @@ impl Collection {
     /// # Returns
     /// * `Result<CallResponse>` - Success or failure of balance check
     fn get_vault_balance(&self) -> Result<CallResponse> {
-        let context = self.context()?;
-        let mut response = CallResponse::forward(&context.incoming_alkanes);
-
-        // Get balances for all payment tokens
-        let mut balances = Vec::new();
-        for option in PAYMENT_OPTIONS.iter() {
-            let balance = self.balance(&context.myself, &option.token_id);
-            let id_str = format!("{}:{}", option.token_id.block, option.token_id.tx);
-            balances.push(json!({
-                "AlkanesId": id_str,
-                "Balance": balance
-            }));
-        }
-
-        // Convert to JSON string
-        let json_str = json!(balances).to_string();
-        response.data = json_str.into_bytes();
-
-        Ok(response)
+        Err(anyhow!("Alkanes payment is not supported"))
     }
 
     pub fn script_minted_count_pointer(&self, index: u32) -> StoragePointer {
