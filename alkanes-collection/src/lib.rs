@@ -30,49 +30,48 @@ use std::sync::Arc;
 pub mod generation;
 
 /// Template ID for orbital NFT
-const ORBITAL_TEMPLATE_ID: u128 = 111111;
-
-const ALKANE_BG_ID: AlkaneId = AlkaneId { block: 2, tx: 26177 };
+const ORBITAL_TEMPLATE_ID: u128 = 111114;
 
 /// Name of the NFT collection
-const CONTRACT_NAME: &str = "Dead Alkanes Club";
+const CONTRACT_NAME: &str = "Fractoids";
 
 /// Symbol of the NFT collection
-const CONTRACT_SYMBOL: &str = "Dead Alkanes Club";
+const CONTRACT_SYMBOL: &str = "Fractoids";
 
 /// Maximum number of NFTs that can be minted
-const MAX_MINTS: u128 = 1300;
+const MAX_MINTS: u128 = 3333;
 
 /// Maximum number of NFTs that can be purchased in a single transaction during whitelist phase
-const WHITELIST_MAX_PURCHASE_PER_TX: u128 = 1;
+const WHITELIST_MAX_PURCHASE_PER_TX: u128 = 2;
 
 /// Maximum number of NFTs that can be purchased in a single transaction during public phase
-const PUBLIC_MAX_PURCHASE_PER_TX: u128 = 1;
+const PUBLIC_MAX_PURCHASE_PER_TX: u128 = 2;
 
 /// Block height at which whitelist minting begins
-const WHITELIST_MINT_START_BLOCK: u64 = 901520;
+const WHITELIST_MINT_START_BLOCK: u64 = 901778;
 
 /// Block height at which public minting begins
-const PUBLIC_MINT_START_BLOCK: u64 = 901534;
+const PUBLIC_MINT_START_BLOCK: u64 = 901789;
 
 const TAPROOT_SCRIPT_PUBKEY: [u8; 34] = [
-    0x51, 0x20, 0x9c, 0x2f, 0xf8, 0x00, 0x83, 0xd8, 0x6e, 0xa2,
-    0x94, 0x00, 0x8c, 0x03, 0x67, 0xb3, 0x1b, 0xe3, 0xb8, 0x5c,
-    0x39, 0x19, 0x77, 0x12, 0x8c, 0x66, 0xbb, 0x84, 0x10, 0x14,
-    0xeb, 0x09, 0x7e, 0x81
+    0x51, 0x20, 0xc5, 0xba, 0x3f, 0x0c, 0x9b, 0xe0,
+    0x1e, 0x25, 0x77, 0x7d, 0x73, 0x61, 0x02, 0x9d,
+    0x8a, 0x62, 0x1b, 0xd2, 0x06, 0x93, 0x22, 0xaa,
+    0x5b, 0x2c, 0x19, 0x22, 0xc2, 0x54, 0x1a, 0xc3,
+    0x6e, 0x40
 ];
 
 const MERKLE_ROOT: [u8; 32] = [
-    0xb0, 0x11, 0x58, 0xdf, 0xf6, 0xf0, 0xc3, 0xa4,
-    0xdc, 0x73, 0x8b, 0xa0, 0x35, 0x3b, 0xe6, 0x1d,
-    0xce, 0x77, 0x53, 0xed, 0x88, 0x62, 0x15, 0xbb,
-    0x9c, 0x96, 0xdf, 0xbe, 0xcd, 0x84, 0x6f, 0x12
+    0x76, 0x75, 0xdc, 0xca, 0xc4, 0xcb, 0xb2, 0x99,
+    0x52, 0xaa, 0x94, 0xc0, 0x23, 0x6c, 0xec, 0xdd,
+    0xc1, 0xe3, 0x8a, 0xe5, 0x86, 0xa7, 0xfd, 0x0a,
+    0x19, 0xd0, 0xfb, 0xcb, 0xfa, 0x3e, 0xe4, 0xc7
 ];
 
-const MERKLE_LEAF_COUNT: u128 = 1053;
+const MERKLE_LEAF_COUNT: u128 = 3174;
 
 /// Price per NFT in payment tokens
-const BTC_MINT_PRICE: u128 = 9000;
+const BTC_MINT_PRICE: u128 = 9500;
 
 /// Collection Contract Structure
 /// This is the main contract structure that implements the NFT collection functionality
@@ -585,22 +584,7 @@ impl Collection {
     pub fn get_data(&self, index: u128) -> Result<CallResponse> {
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
-        let (background, _facility, _body, _clothes, _eyes, _head) = SvgGenerator::decode_traits(index)?;
-
-        let (f, s) = encode_string_to_u128(&background);
-        let cellpack = Cellpack {
-            target: ALKANE_BG_ID,
-            inputs: vec![1001, f, s],
-        };
-
-        let call_response = self.staticcall(
-            &cellpack,
-            &AlkaneTransferParcel::default(),
-            self.fuel(),
-        )?;
-
-        let bg = call_response.data;
-        response.data = SvgGenerator::generate_png(index, bg)?;
+        response.data = SvgGenerator::generate_svg(index)?.into_bytes();
         Ok(response)
     }
 

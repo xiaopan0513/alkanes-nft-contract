@@ -81,7 +81,7 @@ impl SvgGenerator {
             { "trait_type": "Cloth", "value": cloth },
             { "trait_type": "Mouth", "value": mouth },
             { "trait_type": "Eyes", "value": eyes },
-            { "trait_type": "Head Acc", "value": acc },
+            { "trait_type": "head_acc", "value": acc },
             { "trait_type": "Eniv", "value": eniv }
         ]);
         Ok(attributes.to_string())

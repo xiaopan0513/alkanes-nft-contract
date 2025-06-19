@@ -61,12 +61,12 @@ enum OrbitalInstanceMessage {
 
 impl Token for OrbitalInstance {
     fn name(&self) -> String {
-        let name = String::from("Dead Alkanes Club");
+        let name = String::from("Fractoid");
         format!("{} #{}", name, self.index() + 1)
     }
 
     fn symbol(&self) -> String {
-        let symbol = String::from("Dead Alkanes Club");
+        let symbol = String::from("Fractoid");
         format!("{} #{}", symbol, self.index() + 1)
     }
 }
@@ -177,7 +177,7 @@ impl OrbitalInstance {
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
-        response.data = String::from("image/png").into_bytes().to_vec();
+        response.data = String::from("image/svg+xml").into_bytes().to_vec();
 
         Ok(response)
     }
