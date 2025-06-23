@@ -250,14 +250,26 @@ impl Collection {
         StoragePointer::from_keyword("/public-mint-addresses")
     }
 
-    /// Check if an address has already minted in public phase
-    fn has_public_minted(&self, output_script: &Vec<u8>) -> bool {
-        self.public_mint_addresses_pointer().select(output_script).get_value::<u8>() == 1
-    }
+    // /// Check if an address has already minted in public phase
+    // fn has_public_minted(&self, output_script: &Vec<u8>) -> bool {
+    //     self.public_mint_addresses_pointer().select(output_script).get_value::<u8>() == 1
+    // }
 
-    /// Mark an address as having minted in public phase
-    fn mark_public_minted(&self, output_script: &Vec<u8>) {
-        self.public_mint_addresses_pointer().select(output_script).set_value::<u8>(1);
+    // /// Mark an address as having minted in public phase
+    // fn mark_public_minted(&self, output_script: &Vec<u8>) {
+    //     self.public_mint_addresses_pointer().select(output_script).set_value::<u8>(1);
+    // }
+
+    pub fn check_ins_public_minted(&self, output_script: &Vec<u8>,count:u8) -> Result<()> {
+        let current_count = self.public_mint_addresses_pointer().select(output_script).get_value::<u8>();
+        let new_count = current_count.checked_add(count)
+        .ok_or_else(|| anyhow!("Minted count exceeds overflow."))?;
+
+        if new_count  > PUBLIC_MAX_PURCHASE_PER_TX as u8 {
+            return Err(anyhow!("Minted count exceeds limit."));
+        }
+        self.public_mint_addresses_pointer().select(output_script).set_value(new_count);
+        Ok(())
     }
 
     /// Common pre-mint checks
@@ -291,11 +303,7 @@ impl Collection {
                 None => consensus_decode::<Transaction>(&mut std::io::Cursor::new(self.transaction()))?,
             };
             let output_script = tx.output[0].script_pubkey.clone().into_bytes().to_vec();
-            if self.has_public_minted(&output_script) {
-                return Err(anyhow!("Address has already minted in public phase"));
-            }
-            // Mark address as minted in public phase
-            self.mark_public_minted(&output_script);
+            self.check_ins_public_minted(&output_script, count as u8)?
         }
 
         Ok(())

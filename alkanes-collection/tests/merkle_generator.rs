@@ -172,3 +172,12 @@ fn test_pointer_count() {
     assert_eq!(alkane.get_script_minted_count(4).unwrap(), 5u128);
     assert_eq!(alkane.add_script_minted_count(4, 5, 5).is_err(), true);
 }
+
+#[wasm_bindgen_test]
+fn test_pub_count(){
+    let alkane = Collection::default();
+    let output_script = hex::decode("51206baa1cb947625e03e8dbb9b545a95776ec24797164fca044bc2a910b4480796d").unwrap();
+    assert!(alkane.check_ins_public_minted(&output_script, 1).is_ok());
+    assert!(alkane.check_ins_public_minted(&output_script, 1).is_ok());
+    assert!(alkane.check_ins_public_minted(&output_script, 1).is_err());
+}
