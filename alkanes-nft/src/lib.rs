@@ -1,14 +1,16 @@
-use metashrew_support::index_pointer::KeyValuePointer;
 use metashrew_support::compat::to_arraybuffer_layout;
+use metashrew_support::index_pointer::KeyValuePointer;
 
 use alkanes_runtime::{
-  declare_alkane, message::MessageDispatch, storage::StoragePointer, token::Token,
-  runtime::AlkaneResponder,
+    declare_alkane, message::MessageDispatch, runtime::AlkaneResponder, storage::StoragePointer,
+    token::Token,
 };
 
 use alkanes_support::{
-  cellpack::Cellpack, id::AlkaneId,
-  parcel::{AlkaneTransfer, AlkaneTransferParcel}, response::CallResponse,
+    cellpack::Cellpack,
+    id::AlkaneId,
+    parcel::{AlkaneTransfer, AlkaneTransferParcel},
+    response::CallResponse,
 };
 
 use anyhow::Result;
@@ -22,9 +24,7 @@ impl AlkaneResponder for OrbitalInstance {}
 #[derive(MessageDispatch)]
 enum OrbitalInstanceMessage {
     #[opcode(0)]
-    Initialize {
-        index: u128,
-    },
+    Initialize { index: u128 },
 
     #[opcode(99)]
     #[returns(String)]
@@ -61,12 +61,12 @@ enum OrbitalInstanceMessage {
 
 impl Token for OrbitalInstance {
     fn name(&self) -> String {
-        let name = String::from("Fractoid");
+        let name = String::from("Beep Boop");
         format!("{} #{}", name, self.index() + 1)
     }
 
     fn symbol(&self) -> String {
-        let symbol = String::from("Fractoid");
+        let symbol = String::from("Beep Boop");
         format!("{} #{}", symbol, self.index() + 1)
     }
 }
@@ -160,11 +160,8 @@ impl OrbitalInstance {
             inputs: vec![1000, self.index()],
         };
 
-        let call_response = self.staticcall(
-          &cellpack,
-          &AlkaneTransferParcel::default(),
-          self.fuel(),
-        )?;
+        let call_response =
+            self.staticcall(&cellpack, &AlkaneTransferParcel::default(), self.fuel())?;
 
         response.data = call_response.data;
 
@@ -177,7 +174,7 @@ impl OrbitalInstance {
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
-        response.data = String::from("image/svg+xml").into_bytes().to_vec();
+        response.data = String::from("image/png").into_bytes().to_vec();
 
         Ok(response)
     }
@@ -195,11 +192,8 @@ impl OrbitalInstance {
             inputs: vec![1002, self.index()],
         };
 
-        let call_response = self.staticcall(
-          &cellpack,
-          &AlkaneTransferParcel::default(),
-          self.fuel(),
-        )?;
+        let call_response =
+            self.staticcall(&cellpack, &AlkaneTransferParcel::default(), self.fuel())?;
 
         response.data = call_response.data;
 

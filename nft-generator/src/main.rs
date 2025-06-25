@@ -1,10 +1,10 @@
+mod png_generator;
 use anyhow::Result;
-mod svg_generator;
-use svg_generator::SvgGenerator;
 use std::path::Path;
+use crate::png_generator::PngGenerator;
 
 fn main() -> Result<()> {
-    println!("Starting SVG generation...");
+    println!("Starting png generation...");
     
     // Create output directory
     let output_dir = Path::new("output");
@@ -12,9 +12,9 @@ fn main() -> Result<()> {
         std::fs::create_dir(output_dir)?;
     }
 
-    for i in 0..3333 {
-        let svg = SvgGenerator::generate_svg(i)?;
-        let filename = format!("output/{:04}.svg", i);
+    for i in 0..10000 {
+        let svg = PngGenerator::generate_png(i)?;
+        let filename = format!("output/{:04}.png", i);
         std::fs::write(&filename, svg)?;
         
         if i % 100 == 0 {
@@ -22,6 +22,6 @@ fn main() -> Result<()> {
         }
     }
     
-    println!("SVG generation completed!");
+    println!("png generation completed!");
     Ok(())
 }

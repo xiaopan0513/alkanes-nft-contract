@@ -1,11 +1,3 @@
-//! # Alkane Collection Contract
-//!
-//! This contract implements an NFT collection with the following features:
-//! - Premine mechanism for initial token distribution
-//! - Block height based minting start control
-//! - Lottery-based minting success rate
-//! - SVG-based token generation
-
 use alkanes_runtime::{
     declare_alkane, message::MessageDispatch, runtime::AlkaneResponder, storage::StoragePointer,
     token::Token,
@@ -15,11 +7,14 @@ use metashrew_support::index_pointer::KeyValuePointer;
 use metashrew_support::utils::{consume_exact, consume_sized_int, consume_to_end};
 
 use alkanes_support::{
-    cellpack::Cellpack, id::AlkaneId,
-    parcel::{AlkaneTransfer, AlkaneTransferParcel}, response::CallResponse, witness::find_witness_payload,
+    cellpack::Cellpack,
+    id::AlkaneId,
+    parcel::{AlkaneTransfer, AlkaneTransferParcel},
+    response::CallResponse,
+    witness::find_witness_payload,
 };
 
-use crate::generation::svg_generator::SvgGenerator;
+use crate::generation::png_generator::PngGenerator;
 use anyhow::{anyhow, Result};
 use bitcoin::{Transaction, TxOut};
 use metashrew_support::utils::consensus_decode;
@@ -29,49 +24,36 @@ use std::sync::Arc;
 
 pub mod generation;
 
-/// Template ID for orbital NFT
-const ORBITAL_TEMPLATE_ID: u128 = 111114;
+const ORBITAL_TEMPLATE_ID: u128 = 111115;
 
-/// Name of the NFT collection
-const CONTRACT_NAME: &str = "Fractoids";
+const ALKANE_BG_ID: AlkaneId = AlkaneId {
+    block: 2,
+    tx: 31060,
+};
 
-/// Symbol of the NFT collection
-const CONTRACT_SYMBOL: &str = "Fractoids";
-
-/// Maximum number of NFTs that can be minted
-const MAX_MINTS: u128 = 3333;
-
-/// Maximum number of NFTs that can be purchased in a single transaction during whitelist phase
-const WHITELIST_MAX_PURCHASE_PER_TX: u128 = 2;
-
-/// Maximum number of NFTs that can be purchased in a single transaction during public phase
-const PUBLIC_MAX_PURCHASE_PER_TX: u128 = 2;
-
-/// Block height at which whitelist minting begins
-const WHITELIST_MINT_START_BLOCK: u64 = 901778;
-
-/// Block height at which public minting begins
-const PUBLIC_MINT_START_BLOCK: u64 = 901789;
+const CONTRACT_NAME: &str = "Satonomy Beep Boop";
+const CONTRACT_SYMBOL: &str = "Beep Boop";
+const MAX_MINTS: u128 = 10000;
+const WHITELIST_MAX_PURCHASE_PER_TX: u128 = 3;
+const PUBLIC_MAX_PURCHASE_PER_TX: u128 = 3;
+const WHITELIST_MINT_START_BLOCK: u64 = 902536;
+const PUBLIC_MINT_START_BLOCK: u64 = 902566;
 
 const TAPROOT_SCRIPT_PUBKEY: [u8; 34] = [
-    0x51, 0x20, 0xc5, 0xba, 0x3f, 0x0c, 0x9b, 0xe0,
-    0x1e, 0x25, 0x77, 0x7d, 0x73, 0x61, 0x02, 0x9d,
-    0x8a, 0x62, 0x1b, 0xd2, 0x06, 0x93, 0x22, 0xaa,
-    0x5b, 0x2c, 0x19, 0x22, 0xc2, 0x54, 0x1a, 0xc3,
-    0x6e, 0x40
+    0x51, 0x20, 0x7f, 0xd6, 0xeb, 0x82, 0xa4, 0x3a, 0x36, 0xa7, 0xe8, 0x6d, 0xc0, 0x14, 0xf6, 0xd4,
+    0x2b, 0x9a, 0xfe, 0xc3, 0x8b, 0x53, 0xfa, 0x9f, 0x3b, 0x47, 0x0b, 0xfc, 0x41, 0x89, 0x8d, 0x35,
+    0xb4, 0x8c,
 ];
 
 const MERKLE_ROOT: [u8; 32] = [
-    0x76, 0x75, 0xdc, 0xca, 0xc4, 0xcb, 0xb2, 0x99,
-    0x52, 0xaa, 0x94, 0xc0, 0x23, 0x6c, 0xec, 0xdd,
-    0xc1, 0xe3, 0x8a, 0xe5, 0x86, 0xa7, 0xfd, 0x0a,
-    0x19, 0xd0, 0xfb, 0xcb, 0xfa, 0x3e, 0xe4, 0xc7
+    0xbb, 0xae, 0x5e, 0x59, 0x21, 0x8e, 0x9b, 0x85, 0xf6, 0xa9, 0x67, 0x0b, 0x28, 0xa1, 0xdc, 0x9a,
+    0xc3, 0xe8, 0x3d, 0xd6, 0x63, 0x6b, 0xa9, 0xd2, 0x39, 0xba, 0x08, 0x64, 0xf1, 0x11, 0x1b, 0xab,
 ];
 
-const MERKLE_LEAF_COUNT: u128 = 3174;
+const MERKLE_LEAF_COUNT: u128 = 7535;
 
 /// Price per NFT in payment tokens
-const BTC_MINT_PRICE: u128 = 9500;
+const BTC_MINT_PRICE: u128 = 10000;
 
 /// Collection Contract Structure
 /// This is the main contract structure that implements the NFT collection functionality
@@ -145,7 +127,7 @@ enum CollectionMessage {
     #[returns(String)]
     GetCollectionIdentifier,
 
-    /// Get SVG data for a specific orbital
+    /// Get PNG data for a specific orbital
     ///
     /// # Arguments
     /// * `index` - The index of the orbital
@@ -176,15 +158,15 @@ impl Token for Collection {
 }
 
 pub fn encode_string_to_u128(s: &str) -> (u128, u128) {
-    // 确保字符串长度为 32 字节
+    // Make sure the string is 32 bytes long
     let mut bytes = s.as_bytes().to_vec();
     if bytes.len() < 32 {
-        bytes.resize(32, 0); // 用0填充不足部分
+        bytes.resize(32, 0); //Fill the missing part with 0
     } else if bytes.len() > 32 {
-        bytes.truncate(32); // 截断超出部分
+        bytes.truncate(32); // Cut off the excess part
     }
 
-    // 分割为两个 16 字节块并转为 u128（大端序）
+    // Split into two 16-byte blocks and convert to u128 (big endian)
     let (first_half, second_half) = bytes.split_at(16);
     let u1 = u128::from_le_bytes(first_half.try_into().unwrap());
     let u2 = u128::from_le_bytes(second_half.try_into().unwrap());
@@ -250,22 +232,12 @@ impl Collection {
         StoragePointer::from_keyword("/public-mint-addresses")
     }
 
-    // /// Check if an address has already minted in public phase
-    // fn has_public_minted(&self, output_script: &Vec<u8>) -> bool {
-    //     self.public_mint_addresses_pointer().select(output_script).get_value::<u8>() == 1
-    // }
-
-    // /// Mark an address as having minted in public phase
-    // fn mark_public_minted(&self, output_script: &Vec<u8>) {
-    //     self.public_mint_addresses_pointer().select(output_script).set_value::<u8>(1);
-    // }
-
     pub fn check_ins_public_minted(&self, output_script: &Vec<u8>,count:u8) -> Result<()> {
         let current_count = self.public_mint_addresses_pointer().select(output_script).get_value::<u8>();
         let new_count = current_count.checked_add(count)
-        .ok_or_else(|| anyhow!("Minted count exceeds overflow."))?;
+            .ok_or_else(|| anyhow!("Minted count exceeds overflow."))?;
 
-        if new_count  > PUBLIC_MAX_PURCHASE_PER_TX as u8 {
+        if new_count > PUBLIC_MAX_PURCHASE_PER_TX as u8 {
             return Err(anyhow!("Minted count exceeds limit."));
         }
         self.public_mint_addresses_pointer().select(output_script).set_value(new_count);
@@ -290,7 +262,8 @@ impl Collection {
         let current_height = self.height();
 
         // Check if we're in whitelist phase
-        if current_height >= WHITELIST_MINT_START_BLOCK && current_height < PUBLIC_MINT_START_BLOCK {
+        if current_height >= WHITELIST_MINT_START_BLOCK && current_height < PUBLIC_MINT_START_BLOCK
+        {
             // In whitelist phase, must verify whitelist
             self.verify_minted_pubkey(count, tx)?;
         } else if current_height < WHITELIST_MINT_START_BLOCK {
@@ -300,7 +273,9 @@ impl Collection {
             // In public phase, check if address has already minted
             let tx = match tx {
                 Some(tx) => tx.clone(),
-                None => consensus_decode::<Transaction>(&mut std::io::Cursor::new(self.transaction()))?,
+                None => {
+                    consensus_decode::<Transaction>(&mut std::io::Cursor::new(self.transaction()))?
+                }
             };
             let output_script = tx.output[0].script_pubkey.clone().into_bytes().to_vec();
             self.check_ins_public_minted(&output_script, count as u8)?
@@ -324,11 +299,17 @@ impl Collection {
 
         // Check if payment was provided
         if btc_amount < BTC_MINT_PRICE {
-            return Err(anyhow!("BTC payment amount {} below minimum {}", btc_amount, BTC_MINT_PRICE));
+            return Err(anyhow!(
+                "BTC payment amount {} below minimum {}",
+                btc_amount,
+                BTC_MINT_PRICE
+            ));
         }
 
         let current_height = self.height();
-        let max_purchase = if current_height >= WHITELIST_MINT_START_BLOCK && current_height < PUBLIC_MINT_START_BLOCK {
+        let max_purchase = if current_height >= WHITELIST_MINT_START_BLOCK
+            && current_height < PUBLIC_MINT_START_BLOCK
+        {
             WHITELIST_MAX_PURCHASE_PER_TX
         } else {
             PUBLIC_MAX_PURCHASE_PER_TX
@@ -354,7 +335,9 @@ impl Collection {
     /// Calculate the number of orbitals that can be purchased with the given payment amount
     pub fn calculate_purchase_count(&self, payment_amount: u128, price: u128) -> (u128, u128) {
         let current_height = self.height();
-        let max_purchase = if current_height >= WHITELIST_MINT_START_BLOCK && current_height < PUBLIC_MINT_START_BLOCK {
+        let max_purchase = if current_height >= WHITELIST_MINT_START_BLOCK
+            && current_height < PUBLIC_MINT_START_BLOCK
+        {
             WHITELIST_MAX_PURCHASE_PER_TX
         } else {
             PUBLIC_MAX_PURCHASE_PER_TX
@@ -432,7 +415,9 @@ impl Collection {
         let context = self.context()?;
 
         if context.incoming_alkanes.0.len() != 1 {
-            return Err(anyhow!("did not authenticate with only the collection token"));
+            return Err(anyhow!(
+                "did not authenticate with only the collection token"
+            ));
         }
 
         let transfer = context.incoming_alkanes.0[0].clone();
@@ -441,7 +426,9 @@ impl Collection {
         }
 
         if transfer.value < 1 {
-            return Err(anyhow!("less than 1 unit of collection token supplied to authenticate"));
+            return Err(anyhow!(
+                "less than 1 unit of collection token supplied to authenticate"
+            ));
         }
 
         Ok(())
@@ -495,8 +482,7 @@ impl Collection {
     /// * `Result<u128>` - New instance count or error
     fn add_instance(&self, instance_id: &AlkaneId) -> Result<u128> {
         let count = self.instances_count();
-        let new_count = count.checked_add(1)
-            .ok_or_else(|| anyhow!("Minted out"))?;
+        let new_count = count.checked_add(1).ok_or_else(|| anyhow!("Minted out"))?;
 
         let mut bytes = Vec::with_capacity(32);
         bytes.extend_from_slice(&instance_id.block.to_le_bytes());
@@ -569,7 +555,9 @@ impl Collection {
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
         // Calculate actual minted count = total instances count - authorized mint count
-        let minted_count = self.instances_count().saturating_sub(self.get_auth_mint_count());
+        let minted_count = self
+            .instances_count()
+            .saturating_sub(self.get_auth_mint_count());
         response.data = minted_count.to_le_bytes().to_vec();
 
         Ok(response)
@@ -592,7 +580,22 @@ impl Collection {
     pub fn get_data(&self, index: u128) -> Result<CallResponse> {
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
-        response.data = SvgGenerator::generate_svg(index)?.into_bytes();
+        let (background, _back, _body, _head, _hat, _hand) = PngGenerator::decode_traits(index)?;
+
+        let (f, s) = encode_string_to_u128(&background);
+        let cellpack = Cellpack {
+            target: ALKANE_BG_ID,
+            inputs: vec![1001, f, s],
+        };
+
+        let call_response = self.staticcall(
+            &cellpack,
+            &AlkaneTransferParcel::default(),
+            self.fuel(),
+        )?;
+
+        let bg = call_response.data;
+        response.data = PngGenerator::generate_png(index, bg)?;
         Ok(response)
     }
 
@@ -601,7 +604,7 @@ impl Collection {
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
-        let attributes = SvgGenerator::get_attributes(index)?;
+        let attributes = PngGenerator::get_attributes(index)?;
         response.data = attributes.into_bytes();
         Ok(response)
     }
@@ -639,7 +642,8 @@ impl Collection {
     pub fn add_script_minted_count(&self, index: u32, add_count: u128, limit: u128) -> Result<()> {
         let mut pointer = self.script_minted_count_pointer(index);
         let current_count = pointer.get_value::<u128>();
-        let new_count = current_count.checked_add(add_count)
+        let new_count = current_count
+            .checked_add(add_count)
             .ok_or_else(|| anyhow!("Minted count exceeds limit."))?;
 
         if new_count > limit {
@@ -655,16 +659,13 @@ impl Collection {
             None => consensus_decode::<Transaction>(&mut std::io::Cursor::new(self.transaction()))?,
         };
 
-        let output_script = tx.output[0]
-            .script_pubkey
-            .clone()
-            .into_bytes()
-            .to_vec();
+        let output_script = tx.output[0].script_pubkey.clone().into_bytes().to_vec();
 
-        let mut cursor: Cursor<Vec<u8>> =
-            Cursor::<Vec<u8>>::new(find_witness_payload(&tx, 0).ok_or("").map_err(|_| {
-                anyhow!("Proof not submitted to whitelist.")
-            })?);
+        let mut cursor: Cursor<Vec<u8>> = Cursor::<Vec<u8>>::new(
+            find_witness_payload(&tx, 0)
+                .ok_or("")
+                .map_err(|_| anyhow!("Proof not submitted to whitelist."))?,
+        );
 
         let leaf = consume_exact(&mut cursor, output_script.len() + 8)?;
         let leaf_hash = Sha256::hash(&leaf);

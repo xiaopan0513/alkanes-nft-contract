@@ -1,1 +1,1 @@
-pub mod svg_generator; 
+pub mod png_generator;
