@@ -16,7 +16,7 @@ use alkanes_support::{
 
 use crate::generation::png_generator::PngGenerator;
 use anyhow::{anyhow, Result};
-use bitcoin::{Transaction, TxOut};
+use bitcoin::{Block, Transaction, TxOut};
 use metashrew_support::utils::consensus_decode;
 use rs_merkle::{algorithms::Sha256, Hasher, MerkleProof};
 use std::io::Cursor;
@@ -36,8 +36,8 @@ const CONTRACT_SYMBOL: &str = "Beep Boop";
 const MAX_MINTS: u128 = 10000;
 const WHITELIST_MAX_PURCHASE_PER_TX: u128 = 3;
 const PUBLIC_MAX_PURCHASE_PER_TX: u128 = 3;
-const WHITELIST_MINT_START_BLOCK: u64 = 902536;
-const PUBLIC_MINT_START_BLOCK: u64 = 902566;
+const WHITELIST_MINT_START_TM: u64 = 902536;
+const PUBLIC_MINT_START_TM: u64 = 902566;
 
 const TAPROOT_SCRIPT_PUBKEY: [u8; 34] = [
     0x51, 0x20, 0x7f, 0xd6, 0xeb, 0x82, 0xa4, 0x3a, 0x36, 0xa7, 0xe8, 0x6d, 0xc0, 0x14, 0xf6, 0xd4,
@@ -259,16 +259,16 @@ impl Collection {
         }
 
         // Check mint start block
-        let current_height = self.height();
+        let current_tm = self.tm()?;
 
         // Check if we're in whitelist phase
-        if current_height >= WHITELIST_MINT_START_BLOCK && current_height < PUBLIC_MINT_START_BLOCK
+        if current_tm >= WHITELIST_MINT_START_TM && current_tm < PUBLIC_MINT_START_TM
         {
             // In whitelist phase, must verify whitelist
             self.verify_minted_pubkey(count, tx)?;
-        } else if current_height < WHITELIST_MINT_START_BLOCK {
+        } else if current_tm < WHITELIST_MINT_START_TM {
             return Err(anyhow!("Minting has not started yet. Current block: {}, Whitelist start: {}, Public start: {}", 
-                current_height, WHITELIST_MINT_START_BLOCK, PUBLIC_MINT_START_BLOCK));
+                current_tm, WHITELIST_MINT_START_TM, PUBLIC_MINT_START_TM));
         } else {
             // In public phase, check if address has already minted
             let tx = match tx {
@@ -289,6 +289,23 @@ impl Collection {
         return Err(anyhow!("Alkanes payment is not supported"));
     }
 
+    fn calculate_price(&self,tm:u64) -> Result<u64>{
+        let mut pointer = StoragePointer::from_keyword("/start_height");
+        if pointer.get().len() == 0 {
+            if tm >= WHITELIST_MINT_START_TM {
+                pointer.set_value::<u64>(self.height());
+            }
+            return Ok(15000u64);
+        }
+
+        let start_height = pointer.get_value::<u64>();
+        if self.height() < start_height + 3 {
+            return Ok(15000u64);
+        }
+
+        return Ok(25000u64);
+    }
+
     /// Public mint function for orbitals using BTC
     fn mint_orbital_btc(&self) -> Result<CallResponse> {
         let context = self.context()?;
@@ -297,25 +314,28 @@ impl Collection {
             .map_err(|e| anyhow!("Failed to parse Bitcoin transaction: {}", e))?;
         let btc_amount = self.compute_btc_output(&tx);
 
+        let current_tm = self.tm()?;
+        let price = self.calculate_price(current_tm)? as u128;
+
         // Check if payment was provided
-        if btc_amount < BTC_MINT_PRICE {
+        if btc_amount < price {
             return Err(anyhow!(
                 "BTC payment amount {} below minimum {}",
                 btc_amount,
-                BTC_MINT_PRICE
+                price
             ));
         }
 
-        let current_height = self.height();
-        let max_purchase = if current_height >= WHITELIST_MINT_START_BLOCK
-            && current_height < PUBLIC_MINT_START_BLOCK
+        
+        let max_purchase = if current_tm >= WHITELIST_MINT_START_TM
+            && current_tm < PUBLIC_MINT_START_TM
         {
             WHITELIST_MAX_PURCHASE_PER_TX
         } else {
             PUBLIC_MAX_PURCHASE_PER_TX
         };
 
-        let purchase_count = std::cmp::min(btc_amount / BTC_MINT_PRICE, max_purchase);
+        let purchase_count = std::cmp::min(btc_amount / price, max_purchase);
         if purchase_count == 0 {
             return Err(anyhow!("Insufficient BTC payment"));
         }
@@ -334,9 +354,9 @@ impl Collection {
 
     /// Calculate the number of orbitals that can be purchased with the given payment amount
     pub fn calculate_purchase_count(&self, payment_amount: u128, price: u128) -> (u128, u128) {
-        let current_height = self.height();
-        let max_purchase = if current_height >= WHITELIST_MINT_START_BLOCK
-            && current_height < PUBLIC_MINT_START_BLOCK
+        let current_tm = self.tm().unwrap();
+        let max_purchase = if current_tm >= WHITELIST_MINT_START_TM
+            && current_tm < PUBLIC_MINT_START_TM
         {
             WHITELIST_MAX_PURCHASE_PER_TX
         } else {
@@ -547,6 +567,11 @@ impl Collection {
         response.data = 1u128.to_le_bytes().to_vec();
 
         Ok(response)
+    }
+
+    fn tm(&self) -> Result<u64>{
+        let block = consensus_decode::<Block>(&mut std::io::Cursor::new(self.block()))?;
+        Ok(block.header.time as u64)
     }
 
     /// Get the minted count of orbitals
