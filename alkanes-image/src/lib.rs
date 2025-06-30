@@ -11,7 +11,7 @@ use alkanes_support::{
 };
 
 use include_dir::{include_dir, Dir};
-static TRAITS_DIR: Dir = include_dir!("src/traits");
+static TRAITS_DIR: Dir = include_dir!("src/Background");
 
 #[derive(Default)]
 pub struct OrbitalInstance(());
@@ -60,7 +60,7 @@ impl OrbitalInstance {
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
         let name = format!("{}{}", trim(name_part1), trim(name_part2));
-        let image_path = format!("{}/{}.png", "Background", name);
+        let image_path = format!("{}.png", name);
         if let Some(file) = TRAITS_DIR.get_file(&image_path) {
             let trait_img = image::load_from_memory(file.contents())?;
             let trait_rgba = trait_img.to_rgba8();

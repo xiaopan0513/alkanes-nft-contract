@@ -16,7 +16,7 @@ use alkanes_support::{
 
 use crate::generation::png_generator::PngGenerator;
 use anyhow::{anyhow, Result};
-use bitcoin::{Block, Transaction, TxOut};
+use bitcoin::{Transaction, TxOut};
 use metashrew_support::utils::consensus_decode;
 use rs_merkle::{algorithms::Sha256, Hasher, MerkleProof};
 use std::io::Cursor;
@@ -31,13 +31,12 @@ const ALKANE_BG_ID: AlkaneId = AlkaneId {
     tx: 31060,
 };
 
-const CONTRACT_NAME: &str = "Satonomy Beep Boop";
-const CONTRACT_SYMBOL: &str = "Beep Boop";
-const MAX_MINTS: u128 = 10000;
-const WHITELIST_MAX_PURCHASE_PER_TX: u128 = 3;
-const PUBLIC_MAX_PURCHASE_PER_TX: u128 = 3;
-const WHITELIST_MINT_START_TM: u64 = 902536;
-const PUBLIC_MINT_START_TM: u64 = 902566;
+const CONTRACT_NAME: &str = "Orb Ladies";
+const CONTRACT_SYMBOL: &str = "Orb Ladies";
+const MAX_MINTS_DEFAULT: u128 = 2222;
+const PUBLIC_MAX_PURCHASE: u8 = 3;
+const WHITELIST_START_BLOCK: u64 = 902536;
+const PUBLIC_START_BLOCK: u64 = 902566;
 
 const TAPROOT_SCRIPT_PUBKEY: [u8; 34] = [
     0x51, 0x20, 0x7f, 0xd6, 0xeb, 0x82, 0xa4, 0x3a, 0x36, 0xa7, 0xe8, 0x6d, 0xc0, 0x14, 0xf6, 0xd4,
@@ -52,8 +51,20 @@ const MERKLE_ROOT: [u8; 32] = [
 
 const MERKLE_LEAF_COUNT: u128 = 7535;
 
-/// Price per NFT in payment tokens
-const BTC_MINT_PRICE: u128 = 10000;
+/// Initial mint price (sats)
+const INITIAL_MINT_PRICE: u128 = 15000;
+
+/// Maximum mint price (sats)
+const MAX_MINT_PRICE: u128 = 30000;
+
+/// Price increase per step (sats)
+const PRICE_INCREASE_PER_STEP: u128 = 5000;
+
+/// Number of blocks between price increases
+const BLOCKS_BETWEEN_PRICE_INCREASES: u128 = 5;
+
+/// Maximum number of price steps
+const MAX_PRICE_STEPS: u128 = 4;
 
 /// Collection Contract Structure
 /// This is the main contract structure that implements the NFT collection functionality
@@ -91,6 +102,28 @@ enum CollectionMessage {
     #[opcode(81)]
     #[returns(Vec<u128>)]
     GetVaultBalance,
+
+    /// Set max mints (owner only)
+    #[opcode(82)]
+    SetMaxMints { max: u128 },
+
+    /// Set whitelist mint start block (owner only)
+    #[opcode(83)]
+    SetWhitelistStartBlock { block: u128 },
+
+    /// Set public mint start block (owner only)
+    #[opcode(84)]
+    SetPublicStartBlock { block: u128 },
+
+    /// Get whitelist mint start block
+    #[opcode(85)]
+    #[returns(u128)]
+    GetWhitelistStartBlock,
+
+    /// Get public mint start block
+    #[opcode(86)]
+    #[returns(u128)]
+    GetPublicStartBlock,
 
     /// Get the name of the collection
     #[opcode(99)]
@@ -188,6 +221,11 @@ impl Collection {
         self.set_instances_count(0);
         self.set_auth_mint_count(0);
 
+        // Initialize mint start blocks with default values
+        self.set_whitelist_start_block_internal(WHITELIST_START_BLOCK as u128);
+        self.set_public_start_block_internal(PUBLIC_START_BLOCK as u128);
+        self.set_max_mints_internal(MAX_MINTS_DEFAULT);
+
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
@@ -232,15 +270,21 @@ impl Collection {
         StoragePointer::from_keyword("/public-mint-addresses")
     }
 
-    pub fn check_ins_public_minted(&self, output_script: &Vec<u8>,count:u8) -> Result<()> {
-        let current_count = self.public_mint_addresses_pointer().select(output_script).get_value::<u8>();
-        let new_count = current_count.checked_add(count)
+    pub fn check_ins_public_minted(&self, output_script: &Vec<u8>, count: u8) -> Result<()> {
+        let current_count = self
+            .public_mint_addresses_pointer()
+            .select(output_script)
+            .get_value::<u8>();
+        let new_count = current_count
+            .checked_add(count)
             .ok_or_else(|| anyhow!("Minted count exceeds overflow."))?;
 
-        if new_count > PUBLIC_MAX_PURCHASE_PER_TX as u8 {
+        if new_count > PUBLIC_MAX_PURCHASE {
             return Err(anyhow!("Minted count exceeds limit."));
         }
-        self.public_mint_addresses_pointer().select(output_script).set_value(new_count);
+        self.public_mint_addresses_pointer()
+            .select(output_script)
+            .set_value(new_count);
         Ok(())
     }
 
@@ -259,16 +303,17 @@ impl Collection {
         }
 
         // Check mint start block
-        let current_tm = self.tm()?;
+        let current_block = self.height() as u128;
+        let whitelist_start_block = self.get_whitelist_start_block_internal();
+        let public_start_block = self.get_public_start_block_internal();
 
         // Check if we're in whitelist phase
-        if current_tm >= WHITELIST_MINT_START_TM && current_tm < PUBLIC_MINT_START_TM
-        {
+        if current_block >= whitelist_start_block && current_block < public_start_block {
             // In whitelist phase, must verify whitelist
             self.verify_minted_pubkey(count, tx)?;
-        } else if current_tm < WHITELIST_MINT_START_TM {
+        } else if current_block < whitelist_start_block {
             return Err(anyhow!("Minting has not started yet. Current block: {}, Whitelist start: {}, Public start: {}", 
-                current_tm, WHITELIST_MINT_START_TM, PUBLIC_MINT_START_TM));
+                current_block, whitelist_start_block, public_start_block));
         } else {
             // In public phase, check if address has already minted
             let tx = match tx {
@@ -289,21 +334,22 @@ impl Collection {
         return Err(anyhow!("Alkanes payment is not supported"));
     }
 
-    fn calculate_price(&self,tm:u64) -> Result<u64>{
-        let mut pointer = StoragePointer::from_keyword("/start_height");
-        if pointer.get().len() == 0 {
-            if tm >= WHITELIST_MINT_START_TM {
-                pointer.set_value::<u64>(self.height());
-            }
-            return Ok(15000u64);
+    fn calculate_price(&self) -> Result<u128> {
+        let current_block = self.height() as u128;
+        let public_start_block = self.get_public_start_block_internal();
+
+        // Use initial price before public sale
+        if current_block < public_start_block {
+            return Ok(INITIAL_MINT_PRICE);
         }
 
-        let start_height = pointer.get_value::<u64>();
-        if self.height() < start_height + 3 {
-            return Ok(15000u64);
-        }
-
-        return Ok(25000u64);
+        // Calculate price step (0 for first 5 blocks, then increases every 5 blocks)
+        let blocks_since_public_start = current_block.saturating_sub(public_start_block);
+        let price_step =
+            (blocks_since_public_start / BLOCKS_BETWEEN_PRICE_INCREASES).min(MAX_PRICE_STEPS - 1);
+        let calculated_price = INITIAL_MINT_PRICE + (price_step * PRICE_INCREASE_PER_STEP);
+        let price = calculated_price.min(MAX_MINT_PRICE);
+        Ok(price)
     }
 
     /// Public mint function for orbitals using BTC
@@ -314,8 +360,7 @@ impl Collection {
             .map_err(|e| anyhow!("Failed to parse Bitcoin transaction: {}", e))?;
         let btc_amount = self.compute_btc_output(&tx);
 
-        let current_tm = self.tm()?;
-        let price = self.calculate_price(current_tm)? as u128;
+        let price = self.calculate_price()? as u128;
 
         // Check if payment was provided
         if btc_amount < price {
@@ -326,16 +371,7 @@ impl Collection {
             ));
         }
 
-        
-        let max_purchase = if current_tm >= WHITELIST_MINT_START_TM
-            && current_tm < PUBLIC_MINT_START_TM
-        {
-            WHITELIST_MAX_PURCHASE_PER_TX
-        } else {
-            PUBLIC_MAX_PURCHASE_PER_TX
-        };
-
-        let purchase_count = std::cmp::min(btc_amount / price, max_purchase);
+        let purchase_count = btc_amount / price;
         if purchase_count == 0 {
             return Err(anyhow!("Insufficient BTC payment"));
         }
@@ -350,23 +386,6 @@ impl Collection {
         }
 
         Ok(response)
-    }
-
-    /// Calculate the number of orbitals that can be purchased with the given payment amount
-    pub fn calculate_purchase_count(&self, payment_amount: u128, price: u128) -> (u128, u128) {
-        let current_tm = self.tm().unwrap();
-        let max_purchase = if current_tm >= WHITELIST_MINT_START_TM
-            && current_tm < PUBLIC_MINT_START_TM
-        {
-            WHITELIST_MAX_PURCHASE_PER_TX
-        } else {
-            PUBLIC_MAX_PURCHASE_PER_TX
-        };
-
-        let count = payment_amount / price;
-        let limited_count = std::cmp::min(count, max_purchase);
-        let change = payment_amount - (limited_count * price);
-        (limited_count, change)
     }
 
     /// Compute the total output value sent to the taproot address
@@ -424,7 +443,7 @@ impl Collection {
     /// # Returns
     /// * `u128` - Maximum number of tokens that can be minted
     fn max_mints(&self) -> u128 {
-        MAX_MINTS
+        self.get_max_mints_internal()
     }
 
     /// Verify that the caller is the contract owner using collection token
@@ -554,7 +573,7 @@ impl Collection {
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
-        response.data = MAX_MINTS.to_le_bytes().to_vec();
+        response.data = MAX_MINTS_DEFAULT.to_le_bytes().to_vec();
 
         Ok(response)
     }
@@ -567,11 +586,6 @@ impl Collection {
         response.data = 1u128.to_le_bytes().to_vec();
 
         Ok(response)
-    }
-
-    fn tm(&self) -> Result<u64>{
-        let block = consensus_decode::<Block>(&mut std::io::Cursor::new(self.block()))?;
-        Ok(block.header.time as u64)
     }
 
     /// Get the minted count of orbitals
@@ -613,11 +627,8 @@ impl Collection {
             inputs: vec![1001, f, s],
         };
 
-        let call_response = self.staticcall(
-            &cellpack,
-            &AlkaneTransferParcel::default(),
-            self.fuel(),
-        )?;
+        let call_response =
+            self.staticcall(&cellpack, &AlkaneTransferParcel::default(), self.fuel())?;
 
         let bg = call_response.data;
         response.data = PngGenerator::generate_png(index, bg)?;
@@ -715,6 +726,103 @@ impl Collection {
 
         self.add_script_minted_count(index, count, limit as u128)?;
         Ok(())
+    }
+
+    /// Get storage pointer for whitelist mint start block
+    fn whitelist_start_block_pointer(&self) -> StoragePointer {
+        StoragePointer::from_keyword("/whitelist-mint-start-block")
+    }
+
+    /// Get storage pointer for public mint start block
+    fn public_start_block_pointer(&self) -> StoragePointer {
+        StoragePointer::from_keyword("/public-mint-start-block")
+    }
+
+    /// Get whitelist mint start block
+    fn get_whitelist_start_block(&self) -> Result<CallResponse> {
+        let context = self.context()?;
+        let mut response = CallResponse::forward(&context.incoming_alkanes);
+
+        response.data = self
+            .get_whitelist_start_block_internal()
+            .to_le_bytes()
+            .to_vec();
+        Ok(response)
+    }
+
+    /// Set whitelist mint start block (owner only)
+    fn set_whitelist_start_block(&self, block: u128) -> Result<CallResponse> {
+        self.only_owner()?;
+
+        self.set_whitelist_start_block_internal(block);
+
+        let context = self.context()?;
+        let response = CallResponse::forward(&context.incoming_alkanes);
+        Ok(response)
+    }
+
+    /// Get public mint start block
+    fn get_public_start_block(&self) -> Result<CallResponse> {
+        let context = self.context()?;
+        let mut response = CallResponse::forward(&context.incoming_alkanes);
+
+        response.data = self
+            .get_public_start_block_internal()
+            .to_le_bytes()
+            .to_vec();
+        Ok(response)
+    }
+
+    /// Set public mint start block (owner only)
+    fn set_public_start_block(&self, block: u128) -> Result<CallResponse> {
+        self.only_owner()?;
+
+        self.set_public_start_block_internal(block);
+
+        let context = self.context()?;
+        let response = CallResponse::forward(&context.incoming_alkanes);
+        Ok(response)
+    }
+
+    /// Get whitelist start block (internal)
+    fn get_whitelist_start_block_internal(&self) -> u128 {
+        self.whitelist_start_block_pointer().get_value::<u128>()
+    }
+
+    /// Set whitelist start block (internal)
+    fn set_whitelist_start_block_internal(&self, block: u128) {
+        self.whitelist_start_block_pointer()
+            .set_value::<u128>(block);
+    }
+
+    /// Get public start block (internal)
+    fn get_public_start_block_internal(&self) -> u128 {
+        self.public_start_block_pointer().get_value::<u128>()
+    }
+
+    /// Set public start block (internal)
+    fn set_public_start_block_internal(&self, block: u128) {
+        self.public_start_block_pointer().set_value::<u128>(block);
+    }
+
+    fn max_mints_pointer(&self) -> StoragePointer {
+        StoragePointer::from_keyword("/max-mints")
+    }
+
+    fn get_max_mints_internal(&self) -> u128 {
+        self.max_mints_pointer().get_value::<u128>()
+    }
+
+    fn set_max_mints_internal(&self, max: u128) {
+        self.max_mints_pointer().set_value::<u128>(max);
+    }
+
+    fn set_max_mints(&self, max: u128) -> Result<CallResponse> {
+        self.only_owner()?;
+        self.set_max_mints_internal(max);
+        let context = self.context()?;
+        let response = CallResponse::forward(&context.incoming_alkanes);
+        Ok(response)
     }
 }
 

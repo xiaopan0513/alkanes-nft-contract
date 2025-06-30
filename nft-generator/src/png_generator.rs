@@ -15,7 +15,7 @@ impl PngGenerator {
     }
 
     /// Decode traits for a specific NFT index
-    pub fn decode_traits(index: u128) -> Result<(String, String, String, String, String, String)> {
+    pub fn decode_traits(index: u128) -> Result<(String, String, String, String, String, String, String, String, String)> {
         let encoded_traits = Self::get_encoded_traits();
         let format = &encoded_traits["format"];
         let indices = &encoded_traits["indices"];
@@ -42,26 +42,29 @@ impl PngGenerator {
             if let (Some(arr), Some(idx)) = (indices.get(cat).and_then(|v| v.as_array()), code) {
                 arr.get(idx)
                     .and_then(|v| v.as_str())
-                    .unwrap_or("None")
+                    .unwrap_or("none")
                     .to_string()
             } else {
-                "None".to_string()
+                "none".to_string()
             }
         };
 
+        let one_of_one = get_index_str("1of1", get_code("1of1"));
+        let accessory = get_index_str("Accessory", get_code("Accessory"));
         let background = get_index_str("Background", get_code("Background"));
-        let back = get_index_str("Back", get_code("Back"));
         let body = get_index_str("Body", get_code("Body"));
+        let eye = get_index_str("Eye", get_code("Eye"));
+        let hair = get_index_str("Hair", get_code("Hair"));
         let head = get_index_str("Head", get_code("Head"));
-        let hat = get_index_str("Hat", get_code("Hat"));
-        let hand = get_index_str("Hand", get_code("Hand"));
+        let lip = get_index_str("Lip", get_code("Lip"));
+        let wear = get_index_str("Wear", get_code("Wear"));
 
-        Ok((background, back, body, head, hat, hand))
+        Ok((one_of_one, accessory, background, body, eye, hair, head, lip, wear))
     }
 
     // 删除旧的generate_png实现，保留如下新实现：
     pub fn generate_png(index: u128) -> Result<Vec<u8>> {
-        let (background, back, body, head, hat, hand) = Self::decode_traits(index)?;
+        let (one_of_one, accessory, background, body, eye, hair, head, lip, wear) = Self::decode_traits(index)?;
 
         let mut base_image: RgbaImage = ImageBuffer::new(420, 420);
 
@@ -70,7 +73,7 @@ impl PngGenerator {
         }
 
         // 加载背景图片
-        if background != "None" {
+        if background != "none" {
             let bg_image_path = format!("Background/{}.png", background);
             if let Some(file) = TRAITS_DIR.get_file(&bg_image_path) {
                 let bg_img = image::load_from_memory(file.contents())?;
@@ -80,15 +83,17 @@ impl PngGenerator {
         }
 
         let traits = [
-            ("Back", &back),
             ("Body", &body),
+            ("Eye", &eye),
+            ("Hair", &hair),
             ("Head", &head),
-            ("Hat", &hat),
-            ("Hand", &hand),
+            ("Lip", &lip),
+            ("Wear", &wear),
+            ("Accessory", &accessory),
         ];
 
         for (layer, trait_value) in traits.iter() {
-            if trait_value != &"None" {
+            if trait_value != &"none" {
                 let image_path = format!("{}/{}.png", layer, trait_value);
                 if let Some(file) = TRAITS_DIR.get_file(&image_path) {
                     let trait_img = image::load_from_memory(file.contents())?;
@@ -114,31 +119,43 @@ impl PngGenerator {
     /// # Returns
     /// * `Result<String>` - JSON string containing NFT attributes
     pub fn get_attributes(index: u128) -> Result<String> {
-        let (background, back, body, head, hat, hand) = Self::decode_traits(index)?;
+        let (one_of_one, accessory, background, body, eye, hair, head, lip, wear) = Self::decode_traits(index)?;
         let attributes = serde_json::json!([
+            {
+                "trait_type": "1of1",
+                "value": one_of_one
+            },
+            {
+                "trait_type": "Accessory",
+                "value": accessory
+            },
             {
                 "trait_type": "Background",
                 "value": background
-            },
-            {
-                "trait_type": "Back",
-                "value": back
             },
             {
                 "trait_type": "Body",
                 "value": body
             },
             {
+                "trait_type": "Eye",
+                "value": eye
+            },
+            {
+                "trait_type": "Hair",
+                "value": hair
+            },
+            {
                 "trait_type": "Head",
                 "value": head
             },
             {
-                "trait_type": "Hat",
-                "value": hat
+                "trait_type": "Lip",
+                "value": lip
             },
             {
-                "trait_type": "Hand",
-                "value": hand
+                "trait_type": "Wear",
+                "value": wear
             }
         ]);
         Ok(attributes.to_string())
