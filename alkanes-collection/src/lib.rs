@@ -34,6 +34,7 @@ const ALKANE_BG_ID: AlkaneId = AlkaneId {
 const CONTRACT_NAME: &str = "Orb Ladies";
 const CONTRACT_SYMBOL: &str = "Orb Ladies";
 const MAX_MINTS_DEFAULT: u128 = 2222;
+const WHITELIST_MAX_PURCHASE: u8 = 2;
 const PUBLIC_MAX_PURCHASE: u8 = 3;
 const WHITELIST_START_BLOCK: u64 = 902536;
 const PUBLIC_START_BLOCK: u64 = 902566;
@@ -52,19 +53,19 @@ const MERKLE_ROOT: [u8; 32] = [
 const MERKLE_LEAF_COUNT: u128 = 7535;
 
 /// Initial mint price (sats)
-const INITIAL_MINT_PRICE: u128 = 15000;
+const INITIAL_MINT_PRICE: u128 = 10000;
 
 /// Maximum mint price (sats)
 const MAX_MINT_PRICE: u128 = 30000;
 
 /// Price increase per step (sats)
-const PRICE_INCREASE_PER_STEP: u128 = 5000;
+const PRICE_INCREASE_PER_STEP: u128 = 10000;
 
 /// Number of blocks between price increases
 const BLOCKS_BETWEEN_PRICE_INCREASES: u128 = 5;
 
 /// Maximum number of price steps
-const MAX_PRICE_STEPS: u128 = 4;
+const MAX_PRICE_STEPS: u128 = 2;
 
 /// Collection Contract Structure
 /// This is the main contract structure that implements the NFT collection functionality
