@@ -32,7 +32,7 @@ fn generate_pngs() -> Result<()> {
 
 fn generate_encoded_traits() -> Result<()> {
     println!("Starting encoded_traits.json generation...");
-    
+
     // Read metadata.json
     let metadata_content = fs::read_to_string("src/metadata.json")?;
     let metadata: Vec<Value> = serde_json::from_str(&metadata_content)?;
@@ -60,13 +60,13 @@ fn generate_encoded_traits() -> Result<()> {
     for (trait_type, values) in &trait_categories {
         let mut values_vec: Vec<String> = values.iter().cloned().collect();
         values_vec.sort(); // Ensure consistent ordering
-        
+
         let bits_needed = if values_vec.len() <= 1 {
             1
         } else {
             (values_vec.len() as f64).log2().ceil() as u64
         };
-        
+
         trait_info.push((trait_type.clone(), values_vec, bits_needed));
         total_bits += bits_needed;
     }
@@ -148,10 +148,10 @@ fn generate_encoded_traits() -> Result<()> {
 fn main() -> Result<()> {
     // Generate encoded_traits.json from metadata.json
     // generate_encoded_traits()?;
-    
+
     // Generate PNG images (commented out for now)
     generate_pngs()?;
-    
+
     println!("All tasks completed!");
     Ok(())
 }

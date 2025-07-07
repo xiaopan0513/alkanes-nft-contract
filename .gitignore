@@ -26,3 +26,4 @@ Thumbs.db
 /wasm-pack.log
 
 src/tests/std
+nft-generator/src/metadata.json
