@@ -31,6 +31,11 @@ const ALKANE_BG_ID: AlkaneId = AlkaneId {
     tx: 31060,
 };
 
+const ALKANE_ONE_OF_ONE_ID: AlkaneId = AlkaneId {
+    block: 2,
+    tx: 31060,
+};
+
 const CONTRACT_NAME: &str = "Satonomy Beep Boop";
 const CONTRACT_SYMBOL: &str = "Beep Boop";
 const MAX_MINTS: u128 = 10000;
@@ -605,22 +610,43 @@ impl Collection {
     pub fn get_data(&self, index: u128) -> Result<CallResponse> {
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
-        let (background, _back, _body, _head, _hat, _hand) = PngGenerator::decode_traits(index)?;
+        let (one_of_one, background, body
+            , eyes, hair, wear
+            , accessories, head, lips) = PngGenerator::decode_traits(index)?;
+
+        let mut one_of_one_data: Vec<u8> = Vec::new();
+        if one_of_one != "None" {
+            let (f, s) = encode_string_to_u128(&background);
+            let one_of_one_cellpack = Cellpack {
+                target: ALKANE_ONE_OF_ONE_ID,
+                inputs: vec![1001, f, s],
+            };
+
+            let call_response = self.staticcall(
+                &one_of_one_cellpack,
+                &AlkaneTransferParcel::default(),
+                self.fuel(),
+            )?;
+
+            one_of_one_data.extend_from_slice(&call_response.data);
+        }
 
         let (f, s) = encode_string_to_u128(&background);
-        let cellpack = Cellpack {
+        let bg_cellpack = Cellpack {
             target: ALKANE_BG_ID,
             inputs: vec![1001, f, s],
         };
 
         let call_response = self.staticcall(
-            &cellpack,
+            &bg_cellpack,
             &AlkaneTransferParcel::default(),
             self.fuel(),
         )?;
 
-        let bg = call_response.data;
-        response.data = PngGenerator::generate_png(index, bg)?;
+
+
+        let bg_data = call_response.data;
+        response.data = PngGenerator::generate_png(index, bg_data, one_of_one_data)?;
         Ok(response)
     }
 

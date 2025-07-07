@@ -1,6 +1,5 @@
 # Rust build artifacts
 /target/
-**/target/
 **/*.rs.bk
 Cargo.lock
 
@@ -9,7 +8,6 @@ Cargo.lock
 .vscode/
 *.swp
 *.swo
-output
 
 # Generated WebAssembly files
 *.wasm
@@ -26,4 +24,3 @@ Thumbs.db
 /wasm-pack.log
 
 src/tests/std
-nft-generator/src/metadata.json
