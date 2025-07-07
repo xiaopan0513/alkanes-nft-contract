@@ -343,11 +343,6 @@ impl Collection {
         let current_block = self.height() as u128;
         let public_start_block = self.get_public_start_block_internal();
 
-        // Use initial price before public sale
-        if current_block < public_start_block {
-            return Ok(INITIAL_MINT_PRICE);
-        }
-
         // Calculate price step (0 for first 5 blocks, then increases every 5 blocks)
         let blocks_since_public_start = current_block.saturating_sub(public_start_block);
         let price_step =

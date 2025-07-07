@@ -61,7 +61,8 @@ impl PngGenerator {
 
         Ok((one_of_one, background, body, eyes, hair, wear, accessories, head, lips))
     }
-
+    
+    
     pub fn generate_png(index: u128, bg_data: Vec<u8>, one_of_one_data: Vec<u8>) -> Result<Vec<u8>> {
         let (one_of_one, background, body
             , eyes, hair, wear
@@ -109,7 +110,7 @@ impl PngGenerator {
             return Err(anyhow!("Background data is empty"));
         }
 
-        let bg_image = match ImageBuffer::from_raw(420, 420, bg_bytes) {
+        let bg_image = match ImageBuffer::from_raw(512, 512, bg_bytes) {
             Some(img) => img,
             None => return Err(anyhow!("Failed to create image from raw data")),
         };
