@@ -31,6 +31,11 @@ const ALKANE_BG_ID: AlkaneId = AlkaneId {
     tx: 31060,
 };
 
+const ALKANE_ONE_OF_ONE_ID: AlkaneId = AlkaneId {
+    block: 2,
+    tx: 31060,
+};
+
 const CONTRACT_NAME: &str = "Orb Ladies";
 const CONTRACT_SYMBOL: &str = "Orb Ladies";
 const MAX_MINTS_DEFAULT: u128 = 2222;
@@ -52,19 +57,19 @@ const MERKLE_ROOT: [u8; 32] = [
 const MERKLE_LEAF_COUNT: u128 = 7535;
 
 /// Initial mint price (sats)
-const INITIAL_MINT_PRICE: u128 = 15000;
+const INITIAL_MINT_PRICE: u128 = 10000;
 
 /// Maximum mint price (sats)
 const MAX_MINT_PRICE: u128 = 30000;
 
 /// Price increase per step (sats)
-const PRICE_INCREASE_PER_STEP: u128 = 5000;
+const PRICE_INCREASE_PER_STEP: u128 = 10000;
 
 /// Number of blocks between price increases
 const BLOCKS_BETWEEN_PRICE_INCREASES: u128 = 5;
 
 /// Maximum number of price steps
-const MAX_PRICE_STEPS: u128 = 4;
+const MAX_PRICE_STEPS: u128 = 2;
 
 /// Collection Contract Structure
 /// This is the main contract structure that implements the NFT collection functionality
@@ -337,11 +342,6 @@ impl Collection {
     fn calculate_price(&self) -> Result<u128> {
         let current_block = self.height() as u128;
         let public_start_block = self.get_public_start_block_internal();
-
-        // Use initial price before public sale
-        if current_block < public_start_block {
-            return Ok(INITIAL_MINT_PRICE);
-        }
 
         // Calculate price step (0 for first 5 blocks, then increases every 5 blocks)
         let blocks_since_public_start = current_block.saturating_sub(public_start_block);
@@ -619,19 +619,43 @@ impl Collection {
     pub fn get_data(&self, index: u128) -> Result<CallResponse> {
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
-        let (background, _back, _body, _head, _hat, _hand) = PngGenerator::decode_traits(index)?;
+        let (one_of_one, background, body
+            , eyes, hair, wear
+            , accessories, head, lips) = PngGenerator::decode_traits(index)?;
+
+        let mut one_of_one_data: Vec<u8> = Vec::new();
+        if one_of_one != "None" {
+            let (f, s) = encode_string_to_u128(&background);
+            let one_of_one_cellpack = Cellpack {
+                target: ALKANE_ONE_OF_ONE_ID,
+                inputs: vec![1001, f, s],
+            };
+
+            let call_response = self.staticcall(
+                &one_of_one_cellpack,
+                &AlkaneTransferParcel::default(),
+                self.fuel(),
+            )?;
+
+            one_of_one_data.extend_from_slice(&call_response.data);
+        }
 
         let (f, s) = encode_string_to_u128(&background);
-        let cellpack = Cellpack {
+        let bg_cellpack = Cellpack {
             target: ALKANE_BG_ID,
             inputs: vec![1001, f, s],
         };
 
-        let call_response =
-            self.staticcall(&cellpack, &AlkaneTransferParcel::default(), self.fuel())?;
+        let call_response = self.staticcall(
+            &bg_cellpack,
+            &AlkaneTransferParcel::default(),
+            self.fuel(),
+        )?;
 
-        let bg = call_response.data;
-        response.data = PngGenerator::generate_png(index, bg)?;
+
+
+        let bg_data = call_response.data;
+        response.data = PngGenerator::generate_png(index, bg_data, one_of_one_data)?;
         Ok(response)
     }
 

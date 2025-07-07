@@ -42,65 +42,68 @@ impl PngGenerator {
             if let (Some(arr), Some(idx)) = (indices.get(cat).and_then(|v| v.as_array()), code) {
                 arr.get(idx)
                     .and_then(|v| v.as_str())
-                    .unwrap_or("none")
+                    .unwrap_or("None")
                     .to_string()
             } else {
-                "none".to_string()
+                "None".to_string()
             }
         };
 
         let one_of_one = get_index_str("1of1", get_code("1of1"));
-        let accessory = get_index_str("Accessory", get_code("Accessory"));
         let background = get_index_str("Background", get_code("Background"));
         let body = get_index_str("Body", get_code("Body"));
-        let eye = get_index_str("Eye", get_code("Eye"));
+        let eyes = get_index_str("Eyes", get_code("Eyes"));
         let hair = get_index_str("Hair", get_code("Hair"));
-        let head = get_index_str("Head", get_code("Head"));
-        let lip = get_index_str("Lip", get_code("Lip"));
         let wear = get_index_str("Wear", get_code("Wear"));
+        let accessories = get_index_str("Accessories", get_code("Accessories"));
+        let head = get_index_str("Head", get_code("Head"));
+        let lips = get_index_str("Lips", get_code("Lips"));
 
-        Ok((one_of_one, accessory, background, body, eye, hair, head, lip, wear))
+        Ok((one_of_one, background, body, eyes, hair, wear, accessories, head, lips))
     }
 
     // 删除旧的generate_png实现，保留如下新实现：
     pub fn generate_png(index: u128) -> Result<Vec<u8>> {
-        let (one_of_one, accessory, background, body, eye, hair, head, lip, wear) = Self::decode_traits(index)?;
+        let (one_of_one, background, body
+            , eyes, hair, wear
+            , accessories, head, lips) = Self::decode_traits(index)?;
 
-        let mut base_image: RgbaImage = ImageBuffer::new(420, 420);
+        let mut base_image: RgbaImage = ImageBuffer::new(512, 512);
 
         for pixel in base_image.pixels_mut() {
             *pixel = Rgba([0, 0, 0, 0]); // transparent
         }
 
         // 加载背景图片
-        if background != "none" {
-            let bg_image_path = format!("Background/{}.png", background);
-            if let Some(file) = TRAITS_DIR.get_file(&bg_image_path) {
-                let bg_img = image::load_from_memory(file.contents())?;
-                let bg_rgba = bg_img.to_rgba8();
-                imageops::overlay(&mut base_image, &bg_rgba, 0, 0);
+        if one_of_one != "None" {
+            let one_of_one_image_path = format!("1of1/{}.png", one_of_one);
+            if let Some(file) = TRAITS_DIR.get_file(&one_of_one_image_path) {
+                let one_of_one_img = image::load_from_memory(file.contents())?;
+                let one_of_one_rgba = one_of_one_img.to_rgba8();
+                imageops::overlay(&mut base_image, &one_of_one_rgba, 0, 0);
             }
-        }
+        } else {
+            let traits = [
+                ("Background", &background),
+                ("Body", &body),
+                ("Eyes", &eyes),
+                ("Hair", &hair),
+                ("Wear", &wear),
+                ("Accessories", &accessories),
+                ("Head", &head),
+                ("Lips", &lips)
+            ];
 
-        let traits = [
-            ("Body", &body),
-            ("Eye", &eye),
-            ("Hair", &hair),
-            ("Head", &head),
-            ("Lip", &lip),
-            ("Wear", &wear),
-            ("Accessory", &accessory),
-        ];
-
-        for (layer, trait_value) in traits.iter() {
-            if trait_value != &"none" {
-                let image_path = format!("{}/{}.png", layer, trait_value);
-                if let Some(file) = TRAITS_DIR.get_file(&image_path) {
-                    let trait_img = image::load_from_memory(file.contents())?;
-                    let trait_rgba = trait_img.to_rgba8();
-                    imageops::overlay(&mut base_image, &trait_rgba, 0, 0);
-                } else {
-                    return Err(anyhow!("Trait image not found: {}", image_path));
+            for (layer, trait_value) in traits.iter() {
+                if trait_value != &"None"  {
+                    let image_path = format!("{}/{}.png", layer, trait_value);
+                    if let Some(file) = TRAITS_DIR.get_file(&image_path) {
+                        let trait_img = image::load_from_memory(file.contents())?;
+                        let trait_rgba = trait_img.to_rgba8();
+                        imageops::overlay(&mut base_image, &trait_rgba, 0, 0);
+                    } else {
+                        return Err(anyhow!("Trait image not found: {}", image_path));
+                    }
                 }
             }
         }
@@ -119,44 +122,44 @@ impl PngGenerator {
     /// # Returns
     /// * `Result<String>` - JSON string containing NFT attributes
     pub fn get_attributes(index: u128) -> Result<String> {
-        let (one_of_one, accessory, background, body, eye, hair, head, lip, wear) = Self::decode_traits(index)?;
+        let (one_of_one, background, body, eyes, hair, wear, accessories, head, lips) = Self::decode_traits(index)?;
         let attributes = serde_json::json!([
-            {
-                "trait_type": "1of1",
-                "value": one_of_one
-            },
-            {
-                "trait_type": "Accessory",
-                "value": accessory
-            },
-            {
-                "trait_type": "Background",
-                "value": background
-            },
-            {
-                "trait_type": "Body",
-                "value": body
-            },
-            {
-                "trait_type": "Eye",
-                "value": eye
-            },
-            {
-                "trait_type": "Hair",
-                "value": hair
-            },
-            {
-                "trait_type": "Head",
-                "value": head
-            },
-            {
-                "trait_type": "Lip",
-                "value": lip
-            },
-            {
-                "trait_type": "Wear",
-                "value": wear
-            }
+           {
+            "trait_type": "1of1",
+            "value": one_of_one,
+          },
+          {
+            "trait_type": "accessories",
+            "value": accessories,
+          },
+          {
+            "trait_type": "background",
+            "value": background,
+          },
+          {
+            "trait_type": "body",
+            "value": body,
+          },
+          {
+            "trait_type": "eyes",
+            "value": eyes,
+          },
+          {
+            "trait_type": "hair",
+            "value": hair,
+          },
+          {
+            "trait_type": "head",
+            "value": head,
+          },
+          {
+            "trait_type": "lips",
+            "value": lips,
+          },
+          {
+            "trait_type": "wear",
+            "value": wear,
+          }
         ]);
         Ok(attributes.to_string())
     }
